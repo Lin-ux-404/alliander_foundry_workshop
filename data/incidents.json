@@ -1,0 +1,144 @@
+{
+  "incidents": [
+    {
+      "incident_id": "INC-2026-05-21-001",
+      "received_at": "2026-05-21T08:14:00+02:00",
+      "source": "KCC_call",
+      "free_text_nl": "Klant Hoofdstraat 12, 1701 AB Heerhugowaard meldt brandlucht uit de meterkast. Geen rookontwikkeling zichtbaar. Klant heeft zelf de hoofdschakelaar uitgezet. Buren melden geen geur.",
+      "structured_anchors": {
+        "postcode": "1701",
+        "address": "Hoofdstraat 12, 1701 AB Heerhugowaard",
+        "asset_class_hint": "aansluitkast",
+        "voltage_class": "LS",
+        "scada_alarm_id": null
+      },
+      "available_crew": ["crew-001-K-de-Vries", "crew-002-M-Janssen", "crew-003-T-Smit", "crew-004-R-Bakker", "crew-005-J-de-Boer", "crew-006-S-van-Dijk"]
+    },
+    {
+      "incident_id": "INC-2026-05-21-002",
+      "received_at": "2026-05-21T09:02:00+02:00",
+      "source": "KCC_call",
+      "free_text_nl": "Klant Beukenlaan 47, 1704 CD Heerhugowaard meldt geen stroom op één groep in de meterkast. Andere groepen werken normaal. Klant vermoedt een doorgeslagen zekering. Geen brandlucht, geen rookontwikkeling.",
+      "structured_anchors": {
+        "postcode": "1704",
+        "address": "Beukenlaan 47, 1704 CD Heerhugowaard",
+        "asset_class_hint": "aansluitkast",
+        "voltage_class": "LS",
+        "scada_alarm_id": null
+      },
+      "available_crew": ["crew-001-K-de-Vries", "crew-002-M-Janssen", "crew-003-T-Smit", "crew-004-R-Bakker", "crew-005-J-de-Boer", "crew-006-S-van-Dijk"]
+    },
+    {
+      "incident_id": "INC-2026-05-21-003",
+      "received_at": "2026-05-21T07:30:00+02:00",
+      "source": "planned_work_order",
+      "free_text_nl": "Geplande herconfiguratie LS-rek aansluitkast Stationsweg 88, 1815 BR Alkmaar. Eén LS-groep moet onder spanning verwijderd en vervolgens herplaatst worden ten behoeve van capaciteitsuitbreiding voor een nieuwe klant. Het LS-rek blijft tijdens de werkzaamheden onder spanning. Geen storing, planbare werkzaamheden tussen 10:00 en 12:00.",
+      "structured_anchors": {
+        "postcode": "1815",
+        "address": "Stationsweg 88, 1815 BR Alkmaar",
+        "asset_class_hint": "LS-rek",
+        "voltage_class": "LS",
+        "scada_alarm_id": null
+      },
+      "available_crew": ["crew-001-K-de-Vries", "crew-002-M-Janssen", "crew-003-T-Smit", "crew-004-R-Bakker", "crew-005-J-de-Boer", "crew-006-S-van-Dijk"]
+    },
+    {
+      "incident_id": "INC-2026-05-21-004",
+      "received_at": "2026-05-21T10:45:00+02:00",
+      "source": "SCADA_alarm",
+      "free_text_nl": "Storing op LS-kabel tussen verdeelstation Hoorn-Oost en aansluitkast Westerblokker 22, 1622 AA Hoorn. Vermoedelijk verbindingsmoffail; oorzaak (waterindringing, mechanische beschadiging of moef-degradatie) niet bevestigd. Storing geeft afwijkende stroommeting maar geen volledige uitval. Klanten in straat melden flikkerend licht.",
+      "structured_anchors": {
+        "postcode": "1622",
+        "address": "Westerblokker 22, 1622 AA Hoorn",
+        "asset_class_hint": "LS-kabel",
+        "voltage_class": "LS",
+        "scada_alarm_id": "SCADA-NHN-2026-05-21-1041"
+      },
+      "available_crew": ["crew-001-K-de-Vries", "crew-002-M-Janssen", "crew-003-T-Smit", "crew-004-R-Bakker", "crew-005-J-de-Boer", "crew-006-S-van-Dijk"]
+    },
+    {
+      "incident_id": "INC-2026-05-21-005",
+      "received_at": "2026-05-21T07:55:00+02:00",
+      "source": "planned_work_order",
+      "free_text_nl": "Geplande vervanging van een zekeringhouder in aansluitkast Westerweg 14, 1815 GH Alkmaar. Vervanging dient onder spanning te gebeuren omdat de aansluiting twee zorgklanten voedt en uitval niet wenselijk is. Geen storing, planbare werkzaamheden tussen 13:00 en 14:30.",
+      "structured_anchors": {
+        "postcode": "1815",
+        "address": "Westerweg 14, 1815 GH Alkmaar",
+        "asset_class_hint": "aansluitkast",
+        "voltage_class": "LS",
+        "scada_alarm_id": null
+      },
+      "available_crew": ["crew-001-K-de-Vries", "crew-002-M-Janssen", "crew-003-T-Smit", "crew-004-R-Bakker", "crew-005-J-de-Boer", "crew-006-S-van-Dijk"]
+    },
+    {
+      "incident_id": "INC-2026-05-21-006",
+      "received_at": "2026-05-21T08:20:00+02:00",
+      "source": "planned_work_order",
+      "free_text_nl": "Gepland: LS-netdeel uitbedrijfneming en veiligstellen voor onderhoud aan trafostation Hoorn-West, ten behoeve van een verdeelstation revisie. Het betreffende LS-netdeel voedt aansluitingen aan de Westerblokker (postcode 1622). Geen storing, planbare werkzaamheden vanaf 11:00.",
+      "structured_anchors": {
+        "postcode": "1622",
+        "address": "Trafostation Hoorn-West, 1622 BG Hoorn",
+        "asset_class_hint": "LS-netdeel",
+        "voltage_class": "LS",
+        "scada_alarm_id": null
+      },
+      "available_crew": ["crew-001-K-de-Vries", "crew-002-M-Janssen", "crew-003-T-Smit", "crew-004-R-Bakker", "crew-005-J-de-Boer", "crew-006-S-van-Dijk"]
+    },
+    {
+      "incident_id": "INC-2026-05-21-007",
+      "received_at": "2026-05-21T11:12:00+02:00",
+      "source": "KCC_call",
+      "free_text_nl": "Klant Marsdiepstraat 9, 1781 AK Den Helder meldt storing in aansluitkast met klanten zonder stroom in het gehele appartementencomplex (24 huishoudens). Aansluiting 3x80A. Geen brandlucht. Vermoedelijke storing in de aansluitkast.",
+      "structured_anchors": {
+        "postcode": "1781",
+        "address": "Marsdiepstraat 9, 1781 AK Den Helder",
+        "asset_class_hint": "aansluitkast",
+        "voltage_class": "LS",
+        "scada_alarm_id": null
+      },
+      "available_crew": ["crew-001-K-de-Vries", "crew-002-M-Janssen", "crew-003-T-Smit", "crew-004-R-Bakker", "crew-005-J-de-Boer", "crew-006-S-van-Dijk"]
+    },
+    {
+      "incident_id": "INC-2026-05-21-008",
+      "received_at": "2026-05-21T09:35:00+02:00",
+      "source": "field_crew_radio",
+      "free_text_nl": "Kabelfout op LS-groep aan LS-rek Kennemerstraatweg 210, 1815 LN Alkmaar. Veldcrew ter plaatse meldt meerdere parallelle LS-kabels in dezelfde bundel; de exacte voedingskabel naar de getroffen LS-groep moet eerst geselecteerd en geïdentificeerd worden voordat verdere actie ondernomen kan worden. Na identificatie zal de LS-groep spanningsloos verwijderd en herplaatst worden. Klanten in straat zonder stroom.",
+      "structured_anchors": {
+        "postcode": "1815",
+        "address": "Kennemerstraatweg 210, 1815 LN Alkmaar",
+        "asset_class_hint": "LS-rek",
+        "voltage_class": "LS",
+        "scada_alarm_id": "SCADA-NHN-2026-05-21-0930"
+      },
+      "available_crew": ["crew-001-K-de-Vries", "crew-002-M-Janssen", "crew-003-T-Smit", "crew-004-R-Bakker", "crew-005-J-de-Boer", "crew-006-S-van-Dijk"]
+    },
+    {
+      "incident_id": "INC-2026-05-21-009",
+      "received_at": "2026-05-21T08:00:00+02:00",
+      "source": "planned_work_order",
+      "free_text_nl": "Aannemer Van der Velde Infra start morgen graafwerk aan de Hoofdstraat 1705 GR Heerhugowaard ten behoeve van glasvezeluitrol. Werkzaamheden vinden plaats in de directe nabijheid van een LS-kabel volgens KLIC-melding. Liander is verzocht toezicht te houden gedurende de civiele werkzaamheden. Geplande uitvoering vanaf 07:30.",
+      "structured_anchors": {
+        "postcode": "1705",
+        "address": "Hoofdstraat ter hoogte van nr 84, 1705 GR Heerhugowaard",
+        "asset_class_hint": "LS-kabel (graafwerk derden)",
+        "voltage_class": "LS",
+        "scada_alarm_id": null
+      },
+      "available_crew": ["crew-001-K-de-Vries", "crew-002-M-Janssen", "crew-003-T-Smit", "crew-004-R-Bakker", "crew-005-J-de-Boer", "crew-006-S-van-Dijk"]
+    },
+    {
+      "incident_id": "INC-2026-05-21-010",
+      "received_at": "2026-05-21T10:08:00+02:00",
+      "source": "KCC_call",
+      "free_text_nl": "Melding via LS-storingslijn maar betreft kennelijk een middenspanningstoring: ringstoring MS-net kring 13 stedelijk Alkmaar, meerdere trafohuisjes uitgevallen. Beller (collega meldkamer) gaf aan dat het wellicht een vergissing was in doorverbinding via het KCC menu. Postcode 1701 betreft het adres van de beller, niet de locatie van de storing.",
+      "structured_anchors": {
+        "postcode": "1701",
+        "address": "n.v.t. (misroutering — MS-storing)",
+        "asset_class_hint": "MS-ring",
+        "voltage_class": "MS",
+        "scada_alarm_id": null
+      },
+      "available_crew": ["crew-001-K-de-Vries", "crew-002-M-Janssen", "crew-003-T-Smit", "crew-004-R-Bakker", "crew-005-J-de-Boer", "crew-006-S-van-Dijk"]
+    }
+  ]
+}

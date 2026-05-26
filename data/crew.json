@@ -1,0 +1,64 @@
+{
+  "crew": [
+    {
+      "crew_id": "crew-001-K-de-Vries",
+      "name": "K. de Vries",
+      "personeelsnummer": "P-48211",
+      "functie": "Eerste monteur LS",
+      "aanwijzingen": ["WV-BLS"],
+      "raamopdracht_ids": ["RA-NHN-0101"],
+      "home_base": "Heerhugowaard",
+      "shift_status_demo": "available"
+    },
+    {
+      "crew_id": "crew-002-M-Janssen",
+      "name": "M. Janssen",
+      "personeelsnummer": "P-48319",
+      "functie": "Eerste monteur LS",
+      "aanwijzingen": ["WV-BLS"],
+      "raamopdracht_ids": ["RA-NHN-0102"],
+      "home_base": "Alkmaar",
+      "shift_status_demo": "available"
+    },
+    {
+      "crew_id": "crew-003-T-Smit",
+      "name": "T. Smit",
+      "personeelsnummer": "P-47120",
+      "functie": "Toezichthouder LS",
+      "aanwijzingen": ["WV-BLS"],
+      "raamopdracht_ids": ["RA-NHN-0103"],
+      "home_base": "Heerhugowaard",
+      "shift_status_demo": "available"
+    },
+    {
+      "crew_id": "crew-004-R-Bakker",
+      "name": "R. Bakker",
+      "personeelsnummer": "P-49002",
+      "functie": "Eerste monteur LS",
+      "aanwijzingen": ["WV-BLS"],
+      "raamopdracht_ids": ["RA-NHN-0104"],
+      "home_base": "Hoorn",
+      "shift_status_demo": "available"
+    },
+    {
+      "crew_id": "crew-005-J-de-Boer",
+      "name": "J. de Boer",
+      "personeelsnummer": "P-49157",
+      "functie": "Eerste monteur LS",
+      "aanwijzingen": ["WV-BLS"],
+      "raamopdracht_ids": ["RA-NHN-0105"],
+      "home_base": "Hoorn",
+      "shift_status_demo": "available"
+    },
+    {
+      "crew_id": "crew-006-S-van-Dijk",
+      "name": "S. van Dijk",
+      "personeelsnummer": "P-48804",
+      "functie": "Diagnose-monteur LS",
+      "aanwijzingen": ["WV-BLS"],
+      "raamopdracht_ids": ["RA-NHN-0106"],
+      "home_base": "Alkmaar",
+      "shift_status_demo": "available"
+    }
+  ]
+}

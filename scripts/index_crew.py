@@ -1,0 +1,112 @@
+"""
+index_crew.py
+One-time script: reads data/crew.json and indexes crew records into
+Azure AI Search as `idx_crew`.
+
+Requires:
+  pip install azure-search-documents azure-identity python-dotenv
+
+Usage:
+  python scripts/index_crew.py
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from pathlib import Path
+
+from azure.search.documents.indexes.models import (
+    SearchField,
+    SearchFieldDataType,
+    SearchIndex,
+    SemanticConfiguration,
+    SemanticField,
+    SemanticPrioritizedFields,
+    SemanticSearch,
+    SimpleField,
+    SearchableField,
+)
+
+from shared import get_search_clients
+
+INDEX_NAME = os.getenv("AZURE_SEARCH_CREW_INDEX", "idx_crew")
+
+DATA_FILE = Path(__file__).parent.parent / "data" / "crew.json"
+
+
+def _ensure_index(client: SearchIndexClient) -> None:
+    fields = [
+        SimpleField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
+        SimpleField(name="crew_id", type=SearchFieldDataType.String, filterable=True),
+        SearchableField(name="name", type=SearchFieldDataType.String),
+        SimpleField(name="personeelsnummer", type=SearchFieldDataType.String, filterable=True),
+        SearchableField(name="functie", type=SearchFieldDataType.String),
+        SearchField(
+            name="aanwijzingen",
+            type=SearchFieldDataType.Collection(SearchFieldDataType.String),
+            filterable=True,
+        ),
+        SearchField(
+            name="raamopdracht_ids",
+            type=SearchFieldDataType.Collection(SearchFieldDataType.String),
+            filterable=True,
+        ),
+        SearchableField(name="home_base", type=SearchFieldDataType.String, filterable=True),
+        SimpleField(name="shift_status_demo", type=SearchFieldDataType.String, filterable=True),
+    ]
+
+    semantic_config = SemanticConfiguration(
+        name="default",
+        prioritized_fields=SemanticPrioritizedFields(
+            content_fields=[
+                SemanticField(field_name="name"),
+                SemanticField(field_name="functie"),
+            ],
+            title_field=SemanticField(field_name="crew_id"),
+            keywords_fields=[
+                SemanticField(field_name="home_base"),
+            ],
+        ),
+    )
+
+    index = SearchIndex(
+        name=INDEX_NAME,
+        fields=fields,
+        semantic_search=SemanticSearch(configurations=[semantic_config]),
+    )
+
+    client.create_or_update_index(index)
+    print(f"Index '{INDEX_NAME}' ready.")
+
+
+def main() -> None:
+    if not DATA_FILE.exists():
+        print(f"ERROR: {DATA_FILE} not found.")
+        sys.exit(1)
+
+    index_client, search_client = get_search_clients(INDEX_NAME)
+    _ensure_index(index_client)
+
+    records = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    docs = []
+    for crew in records:
+        docs.append({
+            "id": crew["crew_id"],
+            "crew_id": crew["crew_id"],
+            "name": crew.get("name", ""),
+            "personeelsnummer": crew.get("personeelsnummer", ""),
+            "functie": crew.get("functie", ""),
+            "aanwijzingen": crew.get("aanwijzingen", []),
+            "raamopdracht_ids": crew.get("raamopdracht_ids", []),
+            "home_base": crew.get("home_base", ""),
+            "shift_status_demo": crew.get("shift_status_demo", ""),
+        })
+
+    result = search_client.upload_documents(docs)
+    succeeded = sum(1 for r in result if r.succeeded)
+    print(f"Done. Indexed {succeeded}/{len(docs)} crew records into '{INDEX_NAME}'.")
+
+
+if __name__ == "__main__":
+    main()
