@@ -8,3 +8,4 @@ python-dotenv>=1.0.0
 pydantic>=2.7.0
 pypdf>=6.12.0
 aiohttp>=3.13.5
+agent-framework-orchestrations>=1.0.0rc2
