@@ -5,14 +5,14 @@
 .DESCRIPTION
     Creates:
       1. Resource Group
-      2. AI Foundry account + project (with system-assigned identity)
+      2. AI Foundry account (shared) with N projects
       3. Model deployments (gpt-5.4-mini, text-embedding-ada-002, gpt-4.1-mini)
       4. Azure AI Search (basic, system-assigned identity)
       5. Storage Account (Standard_LRS)
       6. Application Insights
       7. Foundry ↔ Search ↔ Storage RBAC bindings
-      8. Foundry project connections (Search, AppInsights)
-      9. .env file
+      8. Per-project Foundry connections (Search, AppInsights)
+      9. Per-project .env files
 
 .PARAMETER Prefix
     Naming prefix for all resources (e.g. "alliander-workshop").
@@ -20,12 +20,18 @@
 .PARAMETER Location
     Azure region. Default: swedencentral.
 
+.PARAMETER ProjectCount
+    Number of Foundry projects to create under the single account.
+    Default: 1. With 1 project, name is "{Prefix}-project".
+    With N>1, names are "{Prefix}-project-01" .. "{Prefix}-project-N".
+    Each project gets its own connections and .env file.
+
 .PARAMETER SubscriptionId
     Target subscription. Uses current default if omitted.
 
 .EXAMPLE
     .\deploy.ps1 -Prefix "alliander-workshop"
-    .\deploy.ps1 -Prefix "myteam-lab" -Location "westeurope"
+    .\deploy.ps1 -Prefix "myteam-lab" -Location "westeurope" -ProjectCount 5
 #>
 
 [CmdletBinding()]
@@ -34,6 +40,9 @@ param(
     [string]$Prefix,
 
     [string]$Location = "swedencentral",
+
+    [ValidateRange(1, 100)]
+    [int]$ProjectCount = 1,
 
     [string]$SubscriptionId
 )
@@ -61,10 +70,18 @@ function Invoke-Az {
 
 $rgName          = "$Prefix-rg"
 $foundryName     = "$Prefix-foundry"
-$projectName     = "$Prefix-project"
 $searchName      = "$Prefix-search"
 $storageName     = ($Prefix -replace '[^a-z0-9]', '') + "blob"
 $appInsightsName = ($Prefix -replace '[^a-z0-9]', '') + "insights"
+
+# Build project name list
+if ($ProjectCount -eq 1) {
+    $projectNames = @("$Prefix-project")
+} else {
+    $projectNames = 1..$ProjectCount | ForEach-Object {
+        "$Prefix-project-{0:D2}" -f $_
+    }
+}
 
 # Truncate storage name to 24 chars (Azure limit)
 if ($storageName.Length -gt 24) { $storageName = $storageName.Substring(0, 24) }
@@ -82,9 +99,51 @@ $subId = $account.id
 $tenantId = $account.tenantId
 Write-Ok "Subscription: $($account.name) ($subId)"
 
-$callerInfo = az ad signed-in-user show --output json 2>$null | ConvertFrom-Json
-$callerId = $callerInfo.id
-$callerUpn = $callerInfo.userPrincipalName
+$callerUpn = $account.user.name
+$callerId = $null
+
+# Try Graph API first
+$callerInfo = az ad signed-in-user show --output json 2>$null
+if ($LASTEXITCODE -eq 0 -and $callerInfo) {
+    $callerParsed = $callerInfo | ConvertFrom-Json
+    $callerId = $callerParsed.id
+    $callerUpn = $callerParsed.userPrincipalName
+}
+
+# Fallback: resolve UPN to object ID
+if (-not $callerId) {
+    Write-Host "   ⚠️  Graph query failed, resolving user via 'az ad user show'..." -ForegroundColor Yellow
+    $adUser = az ad user show --id $callerUpn --query "id" --output tsv 2>$null
+    if ($LASTEXITCODE -eq 0 -and $adUser) {
+        $callerId = $adUser.Trim()
+    }
+}
+
+# Last resort: extract object ID from the access token (no Graph permissions needed)
+if (-not $callerId) {
+    Write-Host "   ⚠️  Extracting object ID from access token..." -ForegroundColor Yellow
+    $tokenJson = az account get-access-token --output json 2>$null
+    if ($LASTEXITCODE -eq 0 -and $tokenJson) {
+        $token = ($tokenJson | ConvertFrom-Json).accessToken
+        # JWT has 3 parts; decode the payload (part 2)
+        $payload = $token.Split('.')[1]
+        # Pad base64 to multiple of 4
+        switch ($payload.Length % 4) {
+            2 { $payload += '==' }
+            3 { $payload += '=' }
+        }
+        $decoded = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($payload))
+        $claims = $decoded | ConvertFrom-Json
+        if ($claims.oid) {
+            $callerId = $claims.oid
+            if ($claims.upn) { $callerUpn = $claims.upn }
+        }
+    }
+}
+
+if (-not $callerId) {
+    throw "Could not resolve object ID for '$callerUpn'. Ensure you have Graph read permissions or pass a service principal."
+}
 Write-Ok "Deploying as: $callerUpn ($callerId)"
 
 # ── 1. Resource Group ────────────────────────────────────────────────────────
@@ -143,29 +202,33 @@ $foundryMI = $foundryJson.identity.principalId
 $foundryResourceId = $foundryJson.id
 Write-Ok "Foundry MI: $foundryMI"
 
-# ── 3. Foundry Project ──────────────────────────────────────────────────────
+# ── 3. Foundry Projects ─────────────────────────────────────────────────────
 
-Write-Step "Foundry project: $projectName"
-$projectResourceId = "$foundryResourceId/projects/$projectName"
-$projectExists = az resource show --ids $projectResourceId --output json 2>$null
-if ($projectExists) {
-    Write-Skip "Already exists"
-} else {
-    # Use REST API — project needs identity in the body
-    $projectBody = @{
-        location   = $Location
-        properties = @{}
-        identity   = @{ type = "SystemAssigned" }
-    } | ConvertTo-Json -Compress
-    $tmpFile = [System.IO.Path]::GetTempFileName()
-    Set-Content -Path $tmpFile -Value $projectBody -Encoding UTF8
-    $projectUrl = "https://management.azure.com$projectResourceId`?api-version=2025-04-01-preview"
-    Invoke-Az rest --method PUT --url $projectUrl --body "@$tmpFile" --headers "Content-Type=application/json" --output none
-    Remove-Item $tmpFile
-    Write-Ok "Created"
+Write-Step "Foundry projects ($ProjectCount)"
+
+$projectBody = @{
+    location   = $Location
+    properties = @{}
+    identity   = @{ type = "SystemAssigned" }
+} | ConvertTo-Json -Compress
+
+$projectResourceIds = @{}
+
+foreach ($projName in $projectNames) {
+    $projResId = "$foundryResourceId/projects/$projName"
+    $projectResourceIds[$projName] = $projResId
+    $projExists = az resource show --ids $projResId --output json 2>$null
+    if ($projExists) {
+        Write-Skip "$projName already exists"
+    } else {
+        $tmpFile = [System.IO.Path]::GetTempFileName()
+        Set-Content -Path $tmpFile -Value $projectBody -Encoding UTF8
+        $projUrl = "https://management.azure.com$projResId`?api-version=2025-04-01-preview"
+        Invoke-Az rest --method PUT --url $projUrl --body "@$tmpFile" --headers "Content-Type=application/json" --output none
+        Remove-Item $tmpFile
+        Write-Ok "$projName created"
+    }
 }
-
-$foundryEndpoint = "https://$foundryName.services.ai.azure.com/api/projects/$projectName"
 
 # ── 4. Model Deployments ────────────────────────────────────────────────────
 
@@ -328,17 +391,13 @@ Ensure-UserRoleAssignment $callerId "Search Index Data Reader" $searchResourceId
 # Current user → Storage Blob Data Contributor
 Ensure-UserRoleAssignment $callerId "Storage Blob Data Contributor" $storageResourceId "User ($callerUpn)"
 
-# ── 9. Foundry Project Connections ───────────────────────────────────────────
+# ── 9. Foundry Project Connections (per project) ────────────────────────────
 
 Write-Step "Foundry project connections"
 
-$projectApiBase = "https://management.azure.com$projectResourceId"
 $apiVersion = "2025-04-01-preview"
-
-# Search connection
-$searchConnName = ($storageName -replace 'blob$', 'search') + "conn"
-# Use a deterministic short name
 $searchConnName = "search-connection"
+$aiConnName     = "appinsights-connection"
 
 $searchConnBody = @{
     properties = @{
@@ -348,20 +407,6 @@ $searchConnBody = @{
     }
 } | ConvertTo-Json -Depth 5
 
-$existingConn = az rest --method get --url "$projectApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='CognitiveSearch'].name" --output json 2>$null | ConvertFrom-Json
-if ($existingConn -and $existingConn.Count -gt 0) {
-    $searchConnName = $existingConn[0]
-    Write-Skip "Search connection exists: $searchConnName"
-} else {
-    az rest --method put `
-        --url "$projectApiBase/connections/$($searchConnName)?api-version=$apiVersion" `
-        --body $searchConnBody `
-        --output none 2>$null
-    Write-Ok "Search connection: $searchConnName"
-}
-
-# AppInsights connection
-$aiConnName = "appinsights-connection"
 $aiConnBody = @{
     properties = @{
         category = "AppInsights"
@@ -370,27 +415,58 @@ $aiConnBody = @{
     }
 } | ConvertTo-Json -Depth 5
 
-$existingAiConn = az rest --method get --url "$projectApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='AppInsights'].name" --output json 2>$null | ConvertFrom-Json
-if ($existingAiConn -and $existingAiConn.Count -gt 0) {
-    Write-Skip "AppInsights connection exists: $($existingAiConn[0])"
-} else {
-    az rest --method put `
-        --url "$projectApiBase/connections/$($aiConnName)?api-version=$apiVersion" `
-        --body $aiConnBody `
-        --output none 2>$null
-    Write-Ok "AppInsights connection: $aiConnName"
+$searchConnNames = @{}
+
+foreach ($projName in $projectNames) {
+    $projResId = $projectResourceIds[$projName]
+    $projApiBase = "https://management.azure.com$projResId"
+
+    # Search connection
+    $existingConn = az rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='CognitiveSearch'].name" --output json 2>$null | ConvertFrom-Json
+    if ($existingConn -and $existingConn.Count -gt 0) {
+        $actualSearchConn = $existingConn[0]
+        Write-Skip "$projName → Search connection exists: $actualSearchConn"
+    } else {
+        $actualSearchConn = $searchConnName
+        az rest --method put `
+            --url "$projApiBase/connections/$($searchConnName)?api-version=$apiVersion" `
+            --body $searchConnBody `
+            --output none 2>$null
+        Write-Ok "$projName → Search connection: $searchConnName"
+    }
+
+    # AppInsights connection
+    $existingAiConn = az rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='AppInsights'].name" --output json 2>$null | ConvertFrom-Json
+    if ($existingAiConn -and $existingAiConn.Count -gt 0) {
+        Write-Skip "$projName → AppInsights connection exists: $($existingAiConn[0])"
+    } else {
+        az rest --method put `
+            --url "$projApiBase/connections/$($aiConnName)?api-version=$apiVersion" `
+            --body $aiConnBody `
+            --output none 2>$null
+        Write-Ok "$projName → AppInsights connection: $aiConnName"
+    }
+
+    # Store connection name for .env generation
+    $searchConnNames[$projName] = if ($existingConn -and $existingConn.Count -gt 0) { $existingConn[0] } else { $searchConnName }
 }
 
-# ── 10. Generate .env ────────────────────────────────────────────────────────
+# ── 10. Generate .env file(s) ────────────────────────────────────────────────
 
-Write-Step "Generating .env file"
+Write-Step "Generating .env file(s)"
 
 $repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
-$envPath = Join-Path $repoRoot ".env"
 
-$envContent = @"
+function Write-EnvFile {
+    param(
+        [string]$Path,
+        [string]$ProjectName,
+        [string]$SearchConnectionName
+    )
+    $endpoint = "https://$foundryName.services.ai.azure.com/api/projects/$ProjectName"
+    $content = @"
 # Azure AI Foundry
-FOUNDRY_PROJECT_ENDPOINT=$foundryEndpoint
+FOUNDRY_PROJECT_ENDPOINT=$endpoint
 FOUNDRY_MODEL=gpt-5.4-mini
 
 # Azure AI Search
@@ -399,7 +475,7 @@ AZURE_SEARCH_ADMIN_KEY=$searchAdminKey
 AZURE_SEARCH_INDEX=idx_bls_corpus
 AZURE_SEARCH_RO_INDEX=idx_raamopdrachten
 AZURE_SEARCH_CREW_INDEX=idx_crew
-AZURE_SEARCH_CONNECTION_NAME=$searchConnName
+AZURE_SEARCH_CONNECTION_NAME=$SearchConnectionName
 
 # Azure Blob Storage (for crew data)
 AZURE_STORAGE_ACCOUNT_URL=$storageUrl
@@ -419,15 +495,30 @@ ALLOWED_ORIGINS=http://localhost:3000
 # Tuning
 SEARCH_TOP_K=6
 "@
-
-if (Test-Path $envPath) {
-    $backup = "$envPath.bak"
-    Copy-Item $envPath $backup -Force
-    Write-Ok "Backed up existing .env → .env.bak"
+    if (Test-Path $Path) {
+        Copy-Item $Path "$Path.bak" -Force
+    }
+    Set-Content -Path $Path -Value $content -Encoding UTF8
+    Write-Ok "Written to $Path"
 }
 
-Set-Content -Path $envPath -Value $envContent -Encoding UTF8
-Write-Ok "Written to $envPath"
+if ($ProjectCount -eq 1) {
+    # Single project → write .env at repo root
+    $envPath = Join-Path $repoRoot ".env"
+    $projName = $projectNames[0]
+    Write-EnvFile -Path $envPath -ProjectName $projName -SearchConnectionName $searchConnNames[$projName]
+} else {
+    # Multiple projects → write .env.<project-name> per project + .env pointing to first
+    foreach ($projName in $projectNames) {
+        $envPath = Join-Path $repoRoot ".env.$projName"
+        Write-EnvFile -Path $envPath -ProjectName $projName -SearchConnectionName $searchConnNames[$projName]
+    }
+    # Default .env → first project (can be switched by copying)
+    $defaultEnv = Join-Path $repoRoot ".env"
+    $firstProj = $projectNames[0]
+    Write-EnvFile -Path $defaultEnv -ProjectName $firstProj -SearchConnectionName $searchConnNames[$firstProj]
+    Write-Ok "Default .env points to $firstProj (switch by copying .env.<name> to .env)"
+}
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 
@@ -439,15 +530,24 @@ Write-Host ""
 Write-Host " Resource Group:    $rgName"
 Write-Host " Location:          $Location"
 Write-Host " Foundry:           $foundryName"
-Write-Host " Project:           $projectName"
-Write-Host " Endpoint:          $foundryEndpoint"
+Write-Host " Projects:          $($projectNames -join ', ')"
 Write-Host " Search:            $searchName"
 Write-Host " Storage:           $storageName"
 Write-Host " App Insights:      $appInsightsName"
 Write-Host ""
+if ($ProjectCount -gt 1) {
+    Write-Host " Project endpoints:" -ForegroundColor Yellow
+    foreach ($p in $projectNames) {
+        Write-Host "   • https://$foundryName.services.ai.azure.com/api/projects/$p"
+    }
+    Write-Host ""
+    Write-Host " .env files:" -ForegroundColor Yellow
+    Write-Host "   • .env           → $($projectNames[0]) (default)"
+    foreach ($p in $projectNames) {
+        Write-Host "   • .env.$p"
+    }
+    Write-Host "   To switch: copy .env.<project-name> to .env"
+    Write-Host ""
+}
 Write-Host " Next steps:" -ForegroundColor Yellow
 Write-Host "   1. Run index scripts:      python app/scripts/setup_search.py --all"
-Write-Host "   2. Deploy agents:          python app/scripts/deploy_agents.py"
-Write-Host "   3. Start backend:          cd app/backend && uvicorn main:app --reload"
-Write-Host "   4. Start frontend:         cd app/frontend && npm run dev"
-Write-Host ""
