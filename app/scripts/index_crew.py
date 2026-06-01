@@ -16,6 +16,7 @@ import os
 import sys
 from pathlib import Path
 
+from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
     SearchField,
     SearchFieldDataType,
@@ -89,6 +90,9 @@ def main() -> None:
     _ensure_index(index_client)
 
     records = json.loads(DATA_FILE.read_text(encoding="utf-8"))
+    # Unwrap if nested under a top-level key
+    if isinstance(records, dict):
+        records = next(iter(records.values()))
     docs = []
     for crew in records:
         docs.append({

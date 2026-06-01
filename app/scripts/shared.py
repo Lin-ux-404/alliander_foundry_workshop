@@ -13,8 +13,8 @@ from azure.search.documents import SearchClient
 from azure.search.documents.indexes import SearchIndexClient
 from dotenv import load_dotenv
 
-# All scripts share the backend .env
-load_dotenv(Path(__file__).parent.parent / "backend" / ".env")
+# All scripts share the repo-root .env
+load_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 
 def get_search_credential():

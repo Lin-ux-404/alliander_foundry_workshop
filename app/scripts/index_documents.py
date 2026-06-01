@@ -20,6 +20,7 @@ import sys
 from base64 import urlsafe_b64encode
 from pathlib import Path
 
+from azure.search.documents.indexes import SearchIndexClient
 from azure.search.documents.indexes.models import (
     SearchFieldDataType,
     SearchIndex,
