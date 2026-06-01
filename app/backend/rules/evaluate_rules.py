@@ -45,7 +45,11 @@ def _load_raamopdrachten() -> tuple:
     Returns a tuple (immutable) so lru_cache can store it."""
     ro_path = _DATA_DIR / "raamopdrachten.json"
     if ro_path.exists():
-        return tuple(json.loads(ro_path.read_text(encoding="utf-8")))
+        data = json.loads(ro_path.read_text(encoding="utf-8"))
+        # Support both {"raamopdrachten": [...]} and bare [...]
+        if isinstance(data, dict):
+            data = data.get("raamopdrachten", list(data.values())[0])
+        return tuple(data)
     return ()
 
 

@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react";
 import ChatInput from "./components/ChatInput";
+import PipelineProgress, { Step } from "./components/PipelineProgress";
 import ResultCard from "./components/ResultCard";
 import { DispatchResult } from "./types";
 
@@ -12,11 +13,13 @@ interface ChatMessage {
   model?: string;
   sources?: string[];
   dispatch?: DispatchResult;
+  steps?: Step[];
 }
 
 export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [loading, setLoading] = useState(false);
+  const [liveSteps, setLiveSteps] = useState<Step[]>([]);
   const nextId = useRef(0);
 
   async function handleSend(message: string) {
@@ -24,9 +27,10 @@ export default function Home() {
     const userMsg: ChatMessage = { id: userId, role: "user", text: message };
     setMessages((prev) => [...prev, userMsg]);
     setLoading(true);
+    setLiveSteps([]);
 
     try {
-      const res = await fetch("/api/chat", {
+      const res = await fetch("/api/chat/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message }),
@@ -41,33 +45,115 @@ export default function Home() {
         return;
       }
 
-      const data = await res.json();
+      const reader = res.body?.getReader();
+      if (!reader) throw new Error("No response body");
 
-      if (data.type === "qa") {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: ++nextId.current,
-            role: "assistant",
-            text: data.response,
-            model: data.model,
-            sources: data.sources,
-          },
-        ]);
-      } else if (data.type === "dispatch") {
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: ++nextId.current,
-            role: "assistant",
-            text: "",
-            model: data.model,
-            sources: data.sources,
-            dispatch: data.response as DispatchResult,
-          },
-        ]);
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const steps: Step[] = [];
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Parse SSE lines
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || ""; // keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const jsonStr = line.slice(6).trim();
+          if (!jsonStr) continue;
+
+          let event;
+          try {
+            event = JSON.parse(jsonStr);
+          } catch {
+            continue;
+          }
+
+          if (event.type === "step_start") {
+            steps.push({
+              agent: event.agent,
+              summary: event.summary,
+              status: "running",
+              timestamp: Date.now(),
+              streamText: "",
+            });
+            setLiveSteps([...steps]);
+          } else if (event.type === "token") {
+            // Append token text to the running step for this agent
+            for (let i = steps.length - 1; i >= 0; i--) {
+              if (steps[i].agent === event.agent && steps[i].status === "running") {
+                steps[i] = {
+                  ...steps[i],
+                  streamText: (steps[i].streamText || "") + event.summary,
+                };
+                break;
+              }
+            }
+            setLiveSteps([...steps]);
+          } else if (event.type === "step_complete") {
+            // Mark the last step for this agent as done, clear streaming text
+            for (let i = steps.length - 1; i >= 0; i--) {
+              if (steps[i].agent === event.agent && steps[i].status === "running") {
+                steps[i] = { ...steps[i], summary: event.summary, status: "done", streamText: undefined };
+                break;
+              }
+            }
+            setLiveSteps([...steps]);
+          } else if (event.type === "incident_detected") {
+            steps.push({
+              agent: event.agent,
+              summary: event.summary,
+              status: "done",
+              timestamp: Date.now(),
+            });
+            setLiveSteps([...steps]);
+          } else if (event.type === "result") {
+            const data = event.data;
+            const finalSteps = [...steps];
+            setLiveSteps([]);
+
+            if (data.type === "qa") {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: ++nextId.current,
+                  role: "assistant",
+                  text: data.response,
+                  model: data.model,
+                  sources: data.sources,
+                  steps: finalSteps,
+                },
+              ]);
+            } else if (data.type === "dispatch") {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: ++nextId.current,
+                  role: "assistant",
+                  text: "",
+                  model: data.model,
+                  sources: data.sources,
+                  dispatch: data.response as DispatchResult,
+                  steps: finalSteps,
+                },
+              ]);
+            }
+          } else if (event.type === "error") {
+            setLiveSteps([]);
+            setMessages((prev) => [
+              ...prev,
+              { id: ++nextId.current, role: "assistant", text: `Fout: ${event.summary}` },
+            ]);
+          }
+        }
       }
     } catch {
+      setLiveSteps([]);
       setMessages((prev) => [
         ...prev,
         { id: ++nextId.current, role: "assistant", text: "Verbindingsfout. Probeer het opnieuw." },
@@ -104,6 +190,18 @@ export default function Home() {
                     : "bg-zinc-100 text-zinc-900 rounded-bl-sm dark:bg-zinc-800 dark:text-zinc-100"
                 }`}
               >
+                {/* Agent steps (collapsed, expandable) */}
+                {m.steps && m.steps.length > 0 && (
+                  <details className="mb-3 group">
+                    <summary className="cursor-pointer text-xs font-semibold text-zinc-500 dark:text-zinc-400 hover:text-orange-500 transition-colors">
+                      <span className="ml-1">Agent pipeline — {m.steps.length} stappen</span>
+                    </summary>
+                    <div className="mt-2 pl-1 border-l-2 border-orange-200 dark:border-orange-800 ml-1">
+                      <PipelineProgress steps={m.steps} />
+                    </div>
+                  </details>
+                )}
+
                 {m.dispatch ? (
                   <ResultCard result={m.dispatch} />
                 ) : (
@@ -121,7 +219,16 @@ export default function Home() {
             </div>
           ))}
 
-          {loading && (
+          {/* Live pipeline progress */}
+          {loading && liveSteps.length > 0 && (
+            <div className="flex justify-start">
+              <div className="max-w-[85%] rounded-2xl rounded-bl-sm bg-zinc-100 px-4 py-3 dark:bg-zinc-800">
+                <PipelineProgress steps={liveSteps} />
+              </div>
+            </div>
+          )}
+
+          {loading && liveSteps.length === 0 && (
             <div className="flex justify-start">
               <div className="rounded-2xl rounded-bl-sm bg-zinc-100 px-4 py-3 dark:bg-zinc-800">
                 <div className="flex gap-1">

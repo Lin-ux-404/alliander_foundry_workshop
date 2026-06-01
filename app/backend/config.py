@@ -41,12 +41,6 @@ def get_foundry_agent(agent_name: str) -> FoundryAgent:
     )
 
 
-# Agent names (from .env or defaults)
-RETRIEVER_AGENT = os.getenv("DRAAD_RETRIEVER_AGENT", "draad-procedure-retriever")
-MATCHER_AGENT = os.getenv("DRAAD_MATCHER_AGENT", "draad-dispatch-matcher")
-REVIEWER_AGENT = os.getenv("DRAAD_REVIEWER_AGENT", "draad-dispatch-reviewer")
-QA_AGENT = os.getenv("DRAAD_QA_AGENT", "draad-qa-assistant")
-
 MODEL = os.getenv("FOUNDRY_MODEL", "gpt-4o")
 SEARCH_TOP_K: int = int(os.getenv("SEARCH_TOP_K", "6"))
 MAX_REVISIONS: int = int(os.getenv("MAX_REVISIONS", "2"))
