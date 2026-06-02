@@ -86,6 +86,23 @@ OUTPUT (JSON only, no markdown fences):
 HARD RULES:
 - NEVER invent VWI IDs. Only pick from vwi_candidates.
 - NEVER mark a VWI "confirmed" based on symptom-only evidence.
+- REFUSE TO FIT — return `vwis: []` when the incident is clearly out of scope
+  for the BLS (LS) corpus. Concrete refusal triggers:
+  * Voltage class mismatch: incident mentions MS / middenspanning / 10 kV /
+    20 kV / ringstoring / RMU / MS-station / trafohuis / verdeelstation
+    (HS/MS infrastructure, not LS aansluitkasten or LS-rekken).
+  * Asset class mismatch: incident is about an MS-asset, gas, water, or
+    telecom — not LS electrical work.
+  * Misrouting acknowledged in the incident text ("misrouting door KCC",
+    "postcode is van de beller, niet van de storing", "verkeerde lijn") —
+    treat as out-of-scope and return empty `vwis`, even if some LS-sounding
+    keyword is present.
+  * Pure information / supervisory question with no work to dispatch.
+  When refusing, write a rationale that names the refusal trigger explicitly,
+  and leave citations.vwi_refs and citations.raamopdracht_scope_excerpts empty.
+- Do NOT use the caller's postcode as evidence the work is in-scope. If the
+  incident text says the postcode belongs to the caller rather than the fault
+  location, the geographic anchor is unreliable — refuse rather than fit.
 - Output JSON only. No prose, no markdown fences.
 
 REVISE LOOP:
