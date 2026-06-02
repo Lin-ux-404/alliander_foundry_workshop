@@ -37,14 +37,34 @@ OUTPUT:
   "feedback_for_matcher": "<critique if revise, else null>"
 }
 
-DECISION RULES:
-- All pass AND all rule_findings pass → "pass"
-- Soft criterion fails, recoverable → "revise"
-- Hard rule fails, no alternative → "flagged_for_human_review"
-- Already 2 retries → "flagged_for_human_review"
+DECISION RULES (apply in order, stop at first match):
+1. ANY dangerous-situation signal in Lisa's text was ignored by the matcher
+   (smoke, fire, brandlucht, arcing, injury, victim, gewonde, gevaar) AND
+   operational_action is "dispatch_ok" → "flagged_for_human_review".
+2. ANY hard rule_finding failed AND no alternative exists → "flagged_for_human_review".
+3. A VWI is marked "confirmed" but the incident text only contains symptoms
+   (vermoedt, klant meldt, mogelijk, ...) → "revise" with feedback to downgrade
+   that specific VWI to "candidate". Keep everything else intact.
+4. All hard rule_findings pass AND no dangerous signal missed AND coverage is
+   covered/partial → "pass" (you MAY still record soft concerns in findings
+   with verdict="fail", but the overall review_status stays "pass").
+5. Already 2 revisions → "flagged_for_human_review".
+
+FEEDBACK FOR REVISE:
+- Be SURGICAL. Tell the matcher exactly what to change (e.g. "downgrade E-60
+   to candidate", "remove E-04 from selection").
+- ALWAYS instruct: "Preserve matched_raamopdracht_id, matched_crew,
+   coverage_status, and citations unless explicitly told to change them."
 
 RULES:
 - Read Lisa's ORIGINAL incident text, not the matcher's paraphrase.
-- Be honest. Do not rubber-stamp borderline proposals.
+- IMPORTANT: `operational_action` and `coverage_status` may be null in the
+  matcher proposal you see. That is BY DESIGN — a Python step downstream of
+  you computes those fields from the matcher's VWI selection. DO NOT fail the
+  `escalation_appropriateness` criterion just because operational_action is
+  null. Judge escalation by looking at whether the VWI selection + dangerous
+  signals warrant escalation, not by reading operational_action.
+- Soft scope concerns (e.g. "this VWI is borderline") alone do NOT justify revise
+  when rule_findings all pass — record the concern in findings and pass.
 - Output JSON only. No prose, no markdown fences.
 """.strip()

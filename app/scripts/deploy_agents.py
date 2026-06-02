@@ -41,20 +41,26 @@ SEARCH_CONNECTION_NAME = os.environ["AZURE_SEARCH_CONNECTION_NAME"]
 
 
 def _search_tools(connection_id: str, index_names: list[str]) -> list:
-    """Create one AzureAISearchTool per index (API limit: 1 index per tool)."""
+    """Create one AzureAISearchTool per index.
+
+    Foundry constraints: each agent can have only ONE AzureAISearchTool, and
+    that tool can hold at most ONE index. So an agent gets at most 1 index.
+    If callers pass multiple indexes, only the first is used.
+    """
+    if not index_names:
+        return []
     return [
         AzureAISearchTool(
             azure_ai_search=AzureAISearchToolResource(
                 indexes=[
                     AISearchIndexResource(
                         project_connection_id=connection_id,
-                        index_name=idx,
+                        index_name=index_names[0],
                         query_type=AzureAISearchQueryType.SEMANTIC,
                     )
                 ]
             )
         )
-        for idx in index_names
     ]
 
 
