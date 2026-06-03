@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Deploys all Azure resources for the Alliander Workshop (labs + DRAAD app).
 
@@ -59,11 +59,30 @@ function Write-Skip([string]$msg) { Write-Host "   ⏭️  $msg" -ForegroundColo
 function Invoke-Az {
     [CmdletBinding()]
     param([Parameter(ValueFromRemainingArguments)] $Args_)
+    # Localize to Continue: az frequently writes WARNINGs (and absent-resource
+    # errors) to stderr. Under $ErrorActionPreference='Stop', Windows PowerShell
+    # 5.1 turns ANY native stderr write into a terminating NativeCommandError —
+    # so a harmless TLS-deprecation warning would crash an otherwise-successful
+    # create. Decide success/failure from the real exit code only.
+    $ErrorActionPreference = 'Continue'
     $result = az @Args_ 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "az command failed: $result"
     }
     return $result
+}
+
+# Probe helper for "does this resource already exist?" reads. Windows PowerShell
+# 5.1 turns a non-zero native exit + stderr into a terminating NativeCommandError
+# whenever $ErrorActionPreference is 'Stop' — even with `2>$null`. We deliberately
+# drop the Stop preference in this function's local scope so a missing resource
+# returns $null instead of crashing the script. (pwsh 7 doesn't have this quirk.)
+function Get-AzOrNull {
+    param([Parameter(ValueFromRemainingArguments)] $Args_)
+    $ErrorActionPreference = 'SilentlyContinue'
+    $out = az @Args_ 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return $out
 }
 
 # ── Derived names ────────────────────────────────────────────────────────────
@@ -99,11 +118,21 @@ $subId = $account.id
 $tenantId = $account.tenantId
 Write-Ok "Subscription: $($account.name) ($subId)"
 
+# Failure mode #1: workspace-based App Insights creation hangs without the
+# AIWorkspacePreview feature flag, and the first `az monitor app-insights` call
+# silently prompts to install its CLI extension (invisible inside the script).
+# Register the flag + enable non-interactive extension install up front.
+Write-Host "   ⚙️  Registering App Insights pre-reqs (feature flag + dynamic install)..." -ForegroundColor Yellow
+az config set extension.use_dynamic_install=yes_without_prompt --only-show-errors 2>$null | Out-Null
+az feature register --name AIWorkspacePreview --namespace microsoft.insights --only-show-errors 2>$null | Out-Null
+az provider register --namespace microsoft.insights --only-show-errors 2>$null | Out-Null
+Write-Ok "App Insights pre-reqs registered"
+
 $callerUpn = $account.user.name
 $callerId = $null
 
 # Try Graph API first
-$callerInfo = az ad signed-in-user show --output json 2>$null
+$callerInfo = Get-AzOrNull ad signed-in-user show --output json
 if ($LASTEXITCODE -eq 0 -and $callerInfo) {
     $callerParsed = $callerInfo | ConvertFrom-Json
     $callerId = $callerParsed.id
@@ -113,7 +142,7 @@ if ($LASTEXITCODE -eq 0 -and $callerInfo) {
 # Fallback: resolve UPN to object ID
 if (-not $callerId) {
     Write-Host "   ⚠️  Graph query failed, resolving user via 'az ad user show'..." -ForegroundColor Yellow
-    $adUser = az ad user show --id $callerUpn --query "id" --output tsv 2>$null
+    $adUser = Get-AzOrNull ad user show --id $callerUpn --query "id" --output tsv
     if ($LASTEXITCODE -eq 0 -and $adUser) {
         $callerId = $adUser.Trim()
     }
@@ -122,7 +151,7 @@ if (-not $callerId) {
 # Last resort: extract object ID from the access token (no Graph permissions needed)
 if (-not $callerId) {
     Write-Host "   ⚠️  Extracting object ID from access token..." -ForegroundColor Yellow
-    $tokenJson = az account get-access-token --output json 2>$null
+    $tokenJson = Get-AzOrNull account get-access-token --output json
     if ($LASTEXITCODE -eq 0 -and $tokenJson) {
         $token = ($tokenJson | ConvertFrom-Json).accessToken
         # JWT has 3 parts; decode the payload (part 2)
@@ -160,7 +189,7 @@ if ($rgExists -eq "true") {
 # ── 2. AI Foundry Account ───────────────────────────────────────────────────
 
 Write-Step "AI Foundry account: $foundryName"
-$foundryExists = az cognitiveservices account show --name $foundryName --resource-group $rgName --output json 2>$null
+$foundryExists = Get-AzOrNull cognitiveservices account show --name $foundryName --resource-group $rgName --output json
 if ($foundryExists) {
     Write-Skip "Already exists"
     # Ensure custom subdomain and identity are set (required for projects)
@@ -183,6 +212,18 @@ if ($foundryExists) {
         Write-Ok "Identity enabled"
     }
 } else {
+    # Azure AI Services accounts are SOFT-DELETED (not purged) when their RG is
+    # deleted. Recreating with the same name fails with FlagMustBeSetForRestore
+    # until the soft-deleted account is purged. Purge any matching ghost first.
+    $deleted = Get-AzOrNull cognitiveservices account list-deleted --query "[?name=='$foundryName']" --output json | ConvertFrom-Json
+    if ($deleted -and $deleted.Count -gt 0) {
+        Write-Host "   ⚙️  Purging soft-deleted account of the same name..." -ForegroundColor Yellow
+        Invoke-Az cognitiveservices account purge `
+            --location $Location `
+            --resource-group $rgName `
+            --name $foundryName
+        Write-Ok "Soft-deleted account purged"
+    }
     Invoke-Az cognitiveservices account create `
         --name $foundryName `
         --resource-group $rgName `
@@ -217,7 +258,7 @@ $projectResourceIds = @{}
 foreach ($projName in $projectNames) {
     $projResId = "$foundryResourceId/projects/$projName"
     $projectResourceIds[$projName] = $projResId
-    $projExists = az resource show --ids $projResId --output json 2>$null
+    $projExists = Get-AzOrNull resource show --ids $projResId --output json
     if ($projExists) {
         Write-Skip "$projName already exists"
     } else {
@@ -228,6 +269,50 @@ foreach ($projName in $projectNames) {
         Remove-Item $tmpFile
         Write-Ok "$projName created"
     }
+}
+
+# ── 3b. Agents Capability Hosts ─────────────────────────────────────────────
+# Failure mode #19: the Foundry Agent Service requires an "Agents" capability
+# host on BOTH the account and each project. Without it, the agents data plane
+# returns 404 "Project not found" for connections.get / agents.create_version,
+# even though the project provisioningState is "Succeeded". A same-name
+# redeploy can mask this if a capability host survived from a prior portal
+# session, but a genuinely clean account has none — so create them explicitly.
+# The account host must reach "Succeeded" before the project host is created.
+
+Write-Step "Agents capability hosts"
+
+function Ensure-CapabilityHost {
+    param([string]$ScopeResourceId, [string]$Label)
+    $hostUrlBase = "https://management.azure.com$ScopeResourceId/capabilityHosts/agentshost"
+    $existing = Get-AzOrNull rest --method get --url "$hostUrlBase`?api-version=2025-04-01-preview" --query "properties.provisioningState" --output tsv
+    if ($existing -eq "Succeeded") {
+        Write-Skip "$Label capability host exists"
+        return
+    }
+    if (-not $existing) {
+        $body = '{"properties":{"capabilityHostKind":"Agents"}}'
+        $f = [System.IO.Path]::GetTempFileName()
+        Set-Content -Path $f -Value $body -Encoding UTF8
+        Invoke-Az rest --method put --url "$hostUrlBase`?api-version=2025-04-01-preview" `
+            --body "@$f" --headers "Content-Type=application/json" --output none
+        Remove-Item $f
+    }
+    # Poll until provisioning completes
+    do {
+        Start-Sleep -Seconds 10
+        $state = Get-AzOrNull rest --method get --url "$hostUrlBase`?api-version=2025-04-01-preview" --query "properties.provisioningState" --output tsv
+    } while ($state -eq "Creating")
+    if ($state -eq "Succeeded") {
+        Write-Ok "$Label capability host ready"
+    } else {
+        throw "$Label capability host provisioning failed: $state"
+    }
+}
+
+Ensure-CapabilityHost $foundryResourceId "Account"
+foreach ($projName in $projectNames) {
+    Ensure-CapabilityHost $projectResourceIds[$projName] "Project ($projName)"
 }
 
 # ── 4. Model Deployments ────────────────────────────────────────────────────
@@ -241,9 +326,9 @@ $models = @(
 )
 
 foreach ($m in $models) {
-    $existing = az cognitiveservices account deployment show `
+    $existing = Get-AzOrNull cognitiveservices account deployment show `
         --name $foundryName --resource-group $rgName `
-        --deployment-name $m.Name --output json 2>$null
+        --deployment-name $m.Name --output json
     if ($existing) {
         Write-Skip "$($m.Name) already deployed"
     } else {
@@ -264,7 +349,7 @@ foreach ($m in $models) {
 # ── 5. Azure AI Search ──────────────────────────────────────────────────────
 
 Write-Step "AI Search: $searchName"
-$searchExists = az search service show --name $searchName --resource-group $rgName --output json 2>$null
+$searchExists = Get-AzOrNull search service show --name $searchName --resource-group $rgName --output json
 if ($searchExists) {
     Write-Skip "Already exists"
 } else {
@@ -286,6 +371,14 @@ $searchResourceId = $searchJson.id
 $searchEndpoint = "https://$searchName.search.windows.net"
 Write-Ok "Search MI: $searchMI"
 
+# Failure mode #5 (part 1): the AzureAISearchTool authenticates with an AAD
+# token. A service in apiKeyOnly mode returns 403 regardless of RBAC. Force
+# mixed auth (AAD + keys) so connection-based AAD auth works.
+Write-Host "   ⚙️  Enabling AAD auth on Search (aadOrApiKey, http403)..." -ForegroundColor Yellow
+Invoke-Az search service update --name $searchName --resource-group $rgName `
+    --auth-options aadOrApiKey --aad-auth-failure-mode http403 --output none
+Write-Ok "Search auth set to aadOrApiKey"
+
 # Get search admin key (needed for .env / index scripts)
 $searchKeys = az search admin-key show --service-name $searchName --resource-group $rgName --output json | ConvertFrom-Json
 $searchAdminKey = $searchKeys.primaryKey
@@ -293,7 +386,7 @@ $searchAdminKey = $searchKeys.primaryKey
 # ── 6. Storage Account ──────────────────────────────────────────────────────
 
 Write-Step "Storage account: $storageName"
-$storageExists = az storage account show --name $storageName --resource-group $rgName --output json 2>$null
+$storageExists = Get-AzOrNull storage account show --name $storageName --resource-group $rgName --output json
 if ($storageExists) {
     Write-Skip "Already exists"
 } else {
@@ -311,7 +404,7 @@ $storageUrl = "https://$storageName.blob.core.windows.net/"
 # ── 7. Application Insights ─────────────────────────────────────────────────
 
 Write-Step "Application Insights: $appInsightsName"
-$aiExists = az monitor app-insights component show --app $appInsightsName --resource-group $rgName --output json 2>$null
+$aiExists = Get-AzOrNull monitor app-insights component show --app $appInsightsName --resource-group $rgName --output json
 if ($aiExists) {
     Write-Skip "Already exists"
 } else {
@@ -326,6 +419,7 @@ if ($aiExists) {
 }
 $aiJson = az monitor app-insights component show --app $appInsightsName --resource-group $rgName --output json | ConvertFrom-Json
 $aiConnectionString = $aiJson.connectionString
+$aiResourceId = $aiJson.id
 
 # ── 8. RBAC Assignments ─────────────────────────────────────────────────────
 
@@ -338,7 +432,7 @@ function Ensure-RoleAssignment {
         [string]$Scope,
         [string]$Label
     )
-    $existing = az role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json 2>$null | ConvertFrom-Json
+    $existing = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json | ConvertFrom-Json
     if ($existing -and $existing.Count -gt 0) {
         Write-Skip "$Label → $Role (exists)"
     } else {
@@ -359,7 +453,7 @@ function Ensure-UserRoleAssignment {
         [string]$Scope,
         [string]$Label
     )
-    $existing = az role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json 2>$null | ConvertFrom-Json
+    $existing = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json | ConvertFrom-Json
     if ($existing -and $existing.Count -gt 0) {
         Write-Skip "$Label → $Role (exists)"
     } else {
@@ -378,6 +472,23 @@ $storageResourceId = "/subscriptions/$subId/resourceGroups/$rgName/providers/Mic
 # Foundry MI → Search: read indexes + manage service
 Ensure-RoleAssignment $foundryMI "Search Index Data Reader" $searchResourceId "Foundry MI"
 Ensure-RoleAssignment $foundryMI "Search Service Contributor" $searchResourceId "Foundry MI"
+
+# Failure mode #5 (parts 2+3): each Foundry PROJECT has its own system-assigned
+# MI, distinct from the account MI above. The AzureAISearchTool authenticates as
+# the PROJECT MI, so it (not the account MI) needs the Search roles.
+foreach ($projName in $projectNames) {
+    $projResId = $projectResourceIds[$projName]
+    $projMi = Get-AzOrNull rest --method get `
+        --url "https://management.azure.com$projResId`?api-version=2025-04-01-preview" `
+        --query "identity.principalId" --output tsv
+    if ($projMi) {
+        $projMi = $projMi.Trim()
+        Ensure-RoleAssignment $projMi "Search Index Data Reader" $searchResourceId "$projName MI"
+        Ensure-RoleAssignment $projMi "Search Service Contributor" $searchResourceId "$projName MI"
+    } else {
+        Write-Host "   ⚠️  Could not resolve project MI for $projName (Search RBAC skipped)" -ForegroundColor Yellow
+    }
+}
 
 # Search MI → Foundry: call OpenAI models
 Ensure-RoleAssignment $searchMI "Cognitive Services OpenAI User" $foundryResourceId "Search MI"
@@ -407,11 +518,16 @@ $searchConnBody = @{
     }
 } | ConvertTo-Json -Depth 5
 
+# Failure mode #17: AppInsights connections reject authType="AAD" with HTTP
+# 400 ("AuthType for AppInsights Connection can only be ApiKey"). They MUST
+# use ApiKey auth with the App Insights connection string as the key. Unlike
+# the Search connection (which works with AAD), this category has no AAD path.
 $aiConnBody = @{
     properties = @{
-        category = "AppInsights"
-        target   = $aiConnectionString
-        authType = "AAD"
+        category    = "AppInsights"
+        target      = $aiResourceId
+        authType    = "ApiKey"
+        credentials = @{ key = $aiConnectionString }
     }
 } | ConvertTo-Json -Depth 5
 
@@ -422,28 +538,41 @@ foreach ($projName in $projectNames) {
     $projApiBase = "https://management.azure.com$projResId"
 
     # Search connection
-    $existingConn = az rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='CognitiveSearch'].name" --output json 2>$null | ConvertFrom-Json
+    $existingConn = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='CognitiveSearch'].name" --output json | ConvertFrom-Json
     if ($existingConn -and $existingConn.Count -gt 0) {
         $actualSearchConn = $existingConn[0]
         Write-Skip "$projName → Search connection exists: $actualSearchConn"
     } else {
         $actualSearchConn = $searchConnName
-        az rest --method put `
+        # Failure mode #2: this PUT MUST include Content-Type or ARM returns
+        # HTTP 415. Pass the body via temp file + header (same pattern as the
+        # project-create PUT in section 3). Use Invoke-Az so a 415 throws
+        # instead of being swallowed by `2>$null --output none`.
+        $searchConnFile = [System.IO.Path]::GetTempFileName()
+        Set-Content -Path $searchConnFile -Value $searchConnBody -Encoding UTF8
+        Invoke-Az rest --method put `
             --url "$projApiBase/connections/$($searchConnName)?api-version=$apiVersion" `
-            --body $searchConnBody `
-            --output none 2>$null
+            --body "@$searchConnFile" `
+            --headers "Content-Type=application/json" `
+            --output none
+        Remove-Item $searchConnFile
         Write-Ok "$projName → Search connection: $searchConnName"
     }
 
     # AppInsights connection
-    $existingAiConn = az rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='AppInsights'].name" --output json 2>$null | ConvertFrom-Json
+    $existingAiConn = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='AppInsights'].name" --output json | ConvertFrom-Json
     if ($existingAiConn -and $existingAiConn.Count -gt 0) {
         Write-Skip "$projName → AppInsights connection exists: $($existingAiConn[0])"
     } else {
-        az rest --method put `
+        # Failure mode #2: same Content-Type requirement as the Search connection.
+        $aiConnFile = [System.IO.Path]::GetTempFileName()
+        Set-Content -Path $aiConnFile -Value $aiConnBody -Encoding UTF8
+        Invoke-Az rest --method put `
             --url "$projApiBase/connections/$($aiConnName)?api-version=$apiVersion" `
-            --body $aiConnBody `
-            --output none 2>$null
+            --body "@$aiConnFile" `
+            --headers "Content-Type=application/json" `
+            --output none
+        Remove-Item $aiConnFile
         Write-Ok "$projName → AppInsights connection: $aiConnName"
     }
 
@@ -519,6 +648,13 @@ if ($ProjectCount -eq 1) {
     Write-EnvFile -Path $defaultEnv -ProjectName $firstProj -SearchConnectionName $searchConnNames[$firstProj]
     Write-Ok "Default .env points to $firstProj (switch by copying .env.<name> to .env)"
 }
+
+# Failure mode #3: uvicorn runs in app/backend/ and loads app/backend/.env, while
+# the deploy/index scripts load the repo-root .env. Mirror the root .env into
+# app/backend/ so both consumers see the same config after every deploy.
+$backendEnv = Join-Path $repoRoot "app\backend\.env"
+Copy-Item (Join-Path $repoRoot ".env") $backendEnv -Force
+Write-Ok "Mirrored .env to app\backend\.env"
 
 # ── Summary ──────────────────────────────────────────────────────────────────
 

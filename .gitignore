@@ -28,3 +28,7 @@ out/
 
 # Logs
 *.log
+
+# Backup env files (may contain secrets)
+.env.bak
+*.env.bak

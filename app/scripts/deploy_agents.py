@@ -70,9 +70,21 @@ def main() -> None:
         credential=DefaultAzureCredential(),
     )
 
-    # Resolve AI Search connection ID
-    connection = project.connections.get(SEARCH_CONNECTION_NAME)
-    conn_id = connection.id
+    # Resolve AI Search connection ID.
+    # Failure mode #19: under azure-ai-projects 2.x (api-version "v1"), the
+    # singular connections.get(name) returns 404 ("Project not found") on a
+    # freshly created project even though the connection exists — but
+    # connections.list() works. So resolve the connection by listing and
+    # matching on name instead of calling get().
+    conn_id = None
+    for c in project.connections.list():
+        if c.name == SEARCH_CONNECTION_NAME:
+            conn_id = c.id
+            break
+    if conn_id is None:
+        raise RuntimeError(
+            f"AI Search connection '{SEARCH_CONNECTION_NAME}' not found in project"
+        )
     print(f"AI Search connection: {SEARCH_CONNECTION_NAME} → {conn_id}")
 
     for agent_def in get_all_agent_configs():

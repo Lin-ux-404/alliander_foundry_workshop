@@ -341,6 +341,334 @@ always returns top-k).
 
 ---
 
+### #13 — `deploy.ps1` saved as UTF-8 **without BOM** → parse error under Windows PowerShell 5.1
+**Where:** `setup/deploy.ps1` line 55 (`Write-Step` helper, which contains a
+`🔹` emoji), but it breaks the *whole file* at parse time.
+
+**Symptom:**
+```
+function Write-Step([string]$msg) { Write-Host "`nðŸ”¹ $msg" ...
+Missing closing '}' in statement block or type definition.
+```
+The script never runs a single line. Note the mangled emoji `ðŸ”¹` — that's the
+tell.
+
+**Root cause:** The file contains multi-byte UTF-8 (emoji in the `Write-*`
+helpers and the `─` box-drawing section headers). Windows PowerShell 5.1
+(`powershell.exe`, the default shell on a fresh Windows box) assumes the
+**system ANSI codepage (Windows-1252)** for files with no BOM. It decodes the
+emoji bytes as several Latin-1 chars, one of which collides with quoting and
+the parser loses brace tracking. It only ever "worked" before because it was
+run under **PowerShell 7** (`pwsh`), which defaults to UTF-8.
+
+**Fix:** Save `deploy.ps1` as **UTF-8 with BOM** (`EF BB BF`). 5.1 then detects
+UTF-8 correctly and 7 still reads it fine.
+```powershell
+$p = (Resolve-Path 'setup/deploy.ps1').Path
+$t = [System.IO.File]::ReadAllText($p)
+[System.IO.File]::WriteAllText($p, $t, (New-Object System.Text.UTF8Encoding $true))
+```
+
+**Trap:** Most editors and several edit tools re-save without a BOM. After any
+programmatic edit, re-stamp the BOM before running under 5.1. (Alternatively,
+strip all non-ASCII from the script — but the BOM is less invasive.)
+
+**Verification:** first 3 bytes must be `EF BB BF`.
+
+---
+
+### #14 — Existence probes crash under `$ErrorActionPreference = "Stop"` in PS 5.1
+**Where:** every "does this resource already exist?" check —
+`az ... show ... 2>$null`, `az ... list ... 2>$null` (Foundry, project,
+deployments, search, storage, app-insights, role assignments, connections).
+
+**Symptom (first hit, fresh RG):**
+```
+🔹 AI Foundry account: alliander-draad-foundry
+az : ERROR: (ResourceNotFound) The Resource '...alliander-draad-foundry' ... was not found.
+... NativeCommandError
+EXIT=1
+```
+The script dies on the *existence check itself* — before it can act on "not
+found = create it".
+
+**Root cause:** When a resource is absent, `az ... show` exits non-zero **and**
+writes to stderr. In Windows PowerShell 5.1, a native command that writes to
+stderr while `$ErrorActionPreference = "Stop"` is in effect raises a
+**terminating `NativeCommandError`** — and the `2>$null` redirect does not
+reliably suppress it. (PowerShell 7 does not do this, which is why it worked
+before.) On a *fresh* deploy every existence check returns "not found", so the
+script can't get past the first probe.
+
+**Fix:** Route all existence/probe reads through a helper that drops the Stop
+preference in its local scope and returns `$null` on non-zero exit:
+```powershell
+function Get-AzOrNull {
+    param([Parameter(ValueFromRemainingArguments)] $Args_)
+    $ErrorActionPreference = 'SilentlyContinue'
+    $out = az @Args_ 2>$null
+    if ($LASTEXITCODE -ne 0) { return $null }
+    return $out
+}
+```
+Then `$x = Get-AzOrNull <service> show ...` instead of `az <service> show ... 2>$null`.
+`Invoke-Az` (which *should* throw on failure for create/update calls) is left
+as-is.
+
+**Lesson:** "Probe" reads and "must-succeed" calls need different error
+semantics. Don't run idempotency checks under a blanket `Stop` in 5.1.
+
+---
+
+### #15 — Cognitive Services account is **soft-deleted**, blocks same-name redeploy
+**Where:** `setup/deploy.ps1` section 2, after deleting the RG and re-running.
+
+**Symptom:**
+```
+🔹 AI Foundry account: alliander-draad-foundry
+az : ERROR: (FlagMustBeSetForRestore) An existing resource ... has been
+soft-deleted. To restore ... specify 'restore' to be 'true' ... If you don't
+want to restore ... please purge it first.
+EXIT=1
+```
+
+**Root cause:** Deleting the resource group does **not** hard-delete an Azure
+AI Services (`Microsoft.CognitiveServices`) account — it goes to a 48-hour
+**soft-delete** state. The name stays reserved, so `account create` with the
+same name fails until the ghost is purged (or restored).
+
+**Fix (added to the script, runs in the `else` branch before create):**
+```powershell
+$deleted = Get-AzOrNull cognitiveservices account list-deleted `
+    --query "[?name=='$foundryName']" --output json | ConvertFrom-Json
+if ($deleted -and $deleted.Count -gt 0) {
+    Invoke-Az cognitiveservices account purge `
+        --location $Location --resource-group $rgName --name $foundryName
+}
+```
+Manual one-off:
+```powershell
+az cognitiveservices account purge --location swedencentral `
+    --resource-group alliander-draad-rg --name alliander-draad-foundry
+```
+
+**Lesson:** Any teardown/redeploy cycle that reuses names must account for
+soft-delete (Cognitive Services, Key Vault, API Management, etc.). "Delete the
+RG and redeploy" is *not* a clean slate for these resource types.
+
+---
+
+### #16 — `Invoke-Az` crashes on a harmless `az` **WARNING** under PS 5.1
+**Where:** `setup/deploy.ps1`, the `Invoke-Az` helper (`$result = az @Args_ 2>&1`),
+first triggered by Storage account creation.
+
+**Symptom:**
+```
+🔹 Storage account: allianderdraadblob
+az : WARNING: The --min-tls-version argument values TLS1_0 and TLS1_1
+have been retired ...
++     $result = az @Args_ 2>&1
+    ... NativeCommandError
+EXIT=1
+```
+The storage account *was* actually created — the script died on a **warning**,
+not an error.
+
+**Root cause:** Same Windows PowerShell 5.1 quirk as #14, but in the
+*must-succeed* path. `Invoke-Az` merges stderr into the pipeline with `2>&1`
+while the script-level `$ErrorActionPreference = "Stop"` is in effect. In 5.1,
+**any** native command that writes to stderr under `Stop` raises a terminating
+`NativeCommandError` — and `az` writes WARNINGs (deprecation notices, preview
+flags, etc.) to stderr all the time. So a successful command with a warning
+banner crashes the script.
+
+**Fix:** Localize the error preference to `Continue` inside `Invoke-Az` and
+decide success/failure purely from `$LASTEXITCODE`:
+```powershell
+function Invoke-Az {
+    param([Parameter(ValueFromRemainingArguments)] $Args_)
+    $ErrorActionPreference = 'Continue'   # don't let stderr warnings throw
+    $result = az @Args_ 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "az command failed: $result" }
+    return $result
+}
+```
+
+**Lesson:** stderr ≠ failure for `az`. Gate on the exit code, never on the
+presence of stderr output. (#14 = same root cause on the probe path; #16 =
+the create/update path. Both stem from `Stop` + native stderr in PS 5.1.)
+
+---
+
+### #17 — AppInsights Foundry connection rejects `authType = "AAD"`
+**Where:** `setup/deploy.ps1`, section 9 (Foundry project connections), the
+`$aiConnBody` PUT for the `appinsights-connection`.
+
+**Symptom:**
+```
+ERROR: AuthType for AppInsights Connection can only be ApiKey
+... "code":"ValidationError" ... "statusCode":400
+```
+The Search connection (category `CognitiveSearch`) creates fine with
+`authType = "AAD"`, so the same shape was used for AppInsights — but the
+AppInsights category has **no AAD code path** and returns HTTP 400.
+
+**Root cause:** Foundry connection categories don't share auth capabilities.
+`CognitiveSearch` supports managed-identity (AAD) auth; `AppInsights` only
+supports `ApiKey`, where the "key" is the App Insights **connection string**.
+
+**Fix:** Build the AppInsights connection body with ApiKey auth, the resource
+ID as `target`, and the connection string as the credential key:
+```powershell
+$aiResourceId = $aiJson.id   # captured right after the component show
+...
+$aiConnBody = @{
+    properties = @{
+        category    = "AppInsights"
+        target      = $aiResourceId
+        authType    = "ApiKey"
+        credentials = @{ key = $aiConnectionString }
+    }
+} | ConvertTo-Json -Depth 5
+```
+
+**Lesson:** Connection `authType` is per-category, not global. Check each
+category's supported auth modes; don't assume AAD works everywhere just
+because it worked for Search.
+
+---
+
+### #18 — Agent `create_version` returns "Project not found" after same-name recreate
+**Where:** `app/scripts/deploy_agents.py`, `project.agents.create_version(...)`,
+run against a project that was just deleted and recreated with the **same name**.
+
+**Symptom:**
+```
+azure.core.exceptions.ResourceNotFoundError: (NotFound) Project not found
+Code: NotFound
+Message: Project not found
+```
+…even though:
+- the control-plane project shows `provisioningState = "Succeeded"`,
+- `project.connections.get(...)` succeeds, and
+- `project.agents.list()` / `project.agents.get(name)` return the agents with
+  their full latest definitions.
+
+**Root cause:** The Foundry **Agent service** keys agents by the stable account
+host + project *name*. After an RG delete + same-name recreate, the agent
+service's **read** path still serves the previously registered agents (cache /
+retained registration), but its **write** path (`create_version`) rejects new
+versions until the recreated project resource is re-registered with the agent
+backend. Control-plane "Succeeded" and the data-plane connections route both
+register faster than the agent write path, so there's a window where reads work
+but writes 404 with "Project not found".
+
+**Impact / handling:**
+- This is an Azure-side eventual-consistency lag, **not** a bug in
+  `deploy_agents.py`. The script is correct.
+- Because the agent service retained the prior registrations, the agents remain
+  present at their correct versions (matcher v8, retriever v3, reviewer v3,
+  qa v1) pointing to the same-named indexes (`idx_bls_corpus`), so the demo is
+  fully functional even while `create_version` is temporarily blocked.
+- Re-running `deploy_agents.py` succeeds once the agent write path catches up
+  (typically within ~15–30 min of the recreate). No code change required.
+
+**Lesson:** For soft-delete resource types, "reads work" does not imply "writes
+work" immediately after a same-name recreate. Treat agent (re)deployment as
+eventually-consistent; verify end state with `agents.list()` / `agents.get()`
+rather than assuming a failed `create_version` means nothing was deployed.
+
+> **Correction (see #19):** On a *genuinely clean* account (RG deleted **and**
+> the soft-deleted Foundry account purged), the "Project not found" error is
+> **not** eventual-consistency lag — it is a hard, permanent failure caused by
+> the missing **Agents capability host**. The same-name redeploys that
+> "recovered on their own" did so because a capability host survived from a
+> prior portal session. A from-scratch deploy never gets one unless it is
+> created explicitly. #19 is the real root cause and fix.
+
+---
+
+### #19 — "Project not found" on a clean deploy: missing capability host + SDK `connections.get` 404
+**Where:** `app/scripts/deploy_agents.py` (`project.connections.get(...)` and
+`project.agents.create_version(...)`) and `setup/deploy.ps1` (no capability
+host was ever created).
+
+**Symptom:** After a fully clean redeploy (RG deleted, soft-deleted Foundry
+account **purged**, fresh infra with brand-new managed identities), agent
+deployment fails permanently:
+```
+azure.core.exceptions.ResourceNotFoundError: (NotFound) Project not found
+```
+Unlike #18, this never self-heals — retried 10+ times over a long window with
+no change.
+
+**Diagnosis (two distinct problems):**
+
+1. **Missing Agents capability host (the real root cause).** The Foundry Agent
+   Service requires an `Agents`-kind **capability host** on *both* the account
+   and the project. On a clean account both were absent:
+   ```
+   az rest GET .../capabilityHosts?api-version=2025-04-01-preview  →  {"value": []}
+   ```
+   `setup/deploy.ps1` never created them (`grep capabilityHost` → no matches).
+   Same-name redeploys appeared to "recover" only because a capability host
+   left over from an earlier portal session was still attached to the surviving
+   (soft-deleted-then-restored) account. A purged account has none.
+
+2. **SDK `connections.get(name)` 404s under api-version `v1` (masking bug).**
+   `azure-ai-projects` 2.1.0 defaults to `api_version="v1"`. Even after the
+   capability hosts existed and the data plane was reachable
+   (`GET .../assistants?api-version=v1` → empty list, OK), the **singular**
+   connection fetch failed while the **list** succeeded:
+   - `GET .../connections/search-connection?api-version=v1` → **404**
+   - `GET .../connections?api-version=v1` (list) → **OK, 2 connections**
+
+   The SDK surfaces that 404 as the same misleading `"Project not found"`,
+   making it look like problem #1 was still unresolved.
+
+**Fix (both parts):**
+
+- **`setup/deploy.ps1` — create capability hosts (new section 3b).** After the
+  projects are created and before agent deployment, PUT an `Agents` capability
+  host on the account, poll to `Succeeded`, then do the same for each project:
+  ```powershell
+  $body = '{"properties":{"capabilityHostKind":"Agents"}}'
+  az rest --method put `
+    --url ".../capabilityHosts/agentshost?api-version=2025-04-01-preview" `
+    --body "@$f" --headers "Content-Type=application/json"
+  # poll properties.provisioningState until "Succeeded" (account first, then project)
+  ```
+  Made idempotent via a `Get-AzOrNull` probe that skips when the host already
+  reports `Succeeded`.
+
+- **`app/scripts/deploy_agents.py` — resolve the connection via `list()`.**
+  Replace the broken singular `get` with a list-and-match:
+  ```python
+  conn_id = None
+  for c in project.connections.list():
+      if c.name == SEARCH_CONNECTION_NAME:
+          conn_id = c.id
+          break
+  ```
+
+**Result:** With the capability hosts present and the connection resolved via
+`list()`, all four agents deploy cleanly (`EXIT=0`): retriever v3, matcher v8,
+reviewer v3, qa v1.
+
+**Lesson:**
+- The Foundry Agent Service is **not** automatically usable just because the
+  project provisioning state is `Succeeded`; it needs explicit account- and
+  project-level `Agents` capability hosts that an RG delete destroys. Bake this
+  into the IaC, don't rely on portal side-effects.
+- A misleading SDK error (`"Project not found"`) can hide a much narrower cause.
+  Probe the raw data plane (assistants/connections list endpoints) to localise
+  the failure before assuming the project itself is missing — here the project
+  was always reachable; only the singular `connections.get` route was broken.
+- Always validate reproducibility from a **purged** account, not just an RG
+  delete; soft-delete + restore can mask missing prerequisites.
+
+---
+
 ## Part 2 — Code changes summary
 
 ### `setup/deploy.ps1`
