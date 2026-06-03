@@ -216,7 +216,7 @@ if ($foundryExists) {
     # deleted. Recreating with the same name fails with FlagMustBeSetForRestore
     # until the soft-deleted account is purged. Purge any matching ghost first.
     $deleted = Get-AzOrNull cognitiveservices account list-deleted --query "[?name=='$foundryName']" --output json | ConvertFrom-Json
-    if ($deleted -and $deleted.Count -gt 0) {
+    if (@($deleted).Count -gt 0) {
         Write-Host "   ⚙️  Purging soft-deleted account of the same name..." -ForegroundColor Yellow
         Invoke-Az cognitiveservices account purge `
             --location $Location `
@@ -434,7 +434,7 @@ function Ensure-RoleAssignment {
         [string]$Label
     )
     $existing = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json | ConvertFrom-Json
-    if ($existing -and $existing.Count -gt 0) {
+    if (@($existing).Count -gt 0) {
         Write-Skip "$Label → $Role (exists)"
     } else {
         Invoke-Az role assignment create `
@@ -455,7 +455,7 @@ function Ensure-UserRoleAssignment {
         [string]$Label
     )
     $existing = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json | ConvertFrom-Json
-    if ($existing -and $existing.Count -gt 0) {
+    if (@($existing).Count -gt 0) {
         Write-Skip "$Label → $Role (exists)"
     } else {
         Invoke-Az role assignment create `
@@ -540,7 +540,7 @@ foreach ($projName in $projectNames) {
 
     # Search connection
     $existingConn = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='CognitiveSearch'].name" --output json | ConvertFrom-Json
-    if ($existingConn -and $existingConn.Count -gt 0) {
+    if (@($existingConn).Count -gt 0) {
         $actualSearchConn = $existingConn[0]
         Write-Skip "$projName → Search connection exists: $actualSearchConn"
     } else {
@@ -562,7 +562,7 @@ foreach ($projName in $projectNames) {
 
     # AppInsights connection
     $existingAiConn = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='AppInsights'].name" --output json | ConvertFrom-Json
-    if ($existingAiConn -and $existingAiConn.Count -gt 0) {
+    if (@($existingAiConn).Count -gt 0) {
         Write-Skip "$projName → AppInsights connection exists: $($existingAiConn[0])"
     } else {
         # Failure mode #2: same Content-Type requirement as the Search connection.
@@ -578,7 +578,7 @@ foreach ($projName in $projectNames) {
     }
 
     # Store connection name for .env generation
-    $searchConnNames[$projName] = if ($existingConn -and $existingConn.Count -gt 0) { $existingConn[0] } else { $searchConnName }
+    $searchConnNames[$projName] = if (@($existingConn).Count -gt 0) { @($existingConn)[0] } else { $searchConnName }
 }
 
 # ── 10. Generate .env file(s) ────────────────────────────────────────────────

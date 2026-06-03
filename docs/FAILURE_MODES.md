@@ -735,6 +735,70 @@ qa v1 (`idx_bls_corpus`).
 
 ---
 
+### #21 — `The property 'Count' cannot be found on this object` under StrictMode (PS 5.1)
+**Where:** `setup/deploy.ps1`, every `if ($x -and $x.Count -gt 0)` guard over
+`az ... --output json | ConvertFrom-Json` output — section 9 (Foundry project
+connections, the `CognitiveSearch` / `AppInsights` checks) hit it first, plus
+the soft-delete purge check and the two `Ensure-*RoleAssignment` helpers.
+
+**Symptom (client-reported, never reproduced on our box):**
+```
+🔹 Foundry project connections
+deploy.ps1: The property 'Count' cannot be found on this object. Verify that the property exists.
+```
+The script aborts (`$ErrorActionPreference = "Stop"`) at the very first
+connection check, before any project connection is created.
+
+**Root cause:** The script runs under `Set-StrictMode -Version Latest`. In
+**Windows PowerShell 5.1**, `.Count` is a synthetic member that only exists on
+collections and `$null` — **not** on a *scalar* `[string]` or a *single*
+`[pscustomobject]`. Under StrictMode, accessing `.Count` on such a scalar
+throws "The property 'Count' cannot be found on this object" (without StrictMode
+it would silently return `$null`).
+
+The scalar appears because of a **build-dependent quirk of `ConvertFrom-Json`
+in PS 5.1**: on *older* 5.1 builds a single-element JSON array
+(`["search-connection"]`) is *unwrapped* into a bare scalar string, so
+`$existingConn.Count` throws. This is also exactly **why it never reproduced on
+our box** — our newer 5.1 build (5.1.26100+) keeps the one-element result as an
+`Object[]` (Count = 1, fine), so the same line ran clean for us regardless of
+how many connections existed. The crash only surfaces where the *client's*
+older 5.1 build does the unwrap **and** a category has exactly one connection.
+Verified by simulating the unwrapped scalar: the OLD guard
+`if ($existing -and $existing.Count -gt 0)` throws the exact client error, while
+the fixed `if (@($existing).Count -gt 0)` returns `1`.
+
+Proof (PS 5.1, `Set-StrictMode -Version Latest`):
+```powershell
+('search-connection').Count          # ERR: property 'Count' cannot be found
+([pscustomobject]@{name='x'}).Count  # ERR: property 'Count' cannot be found
+('[]' | ConvertFrom-Json).Count      # 0   (ok)
+@('search-connection').Count         # 1   (ok)
+```
+
+**Fix:** Force array context with the array-subexpression operator `@(...)`
+before reading `.Count` (and before indexing `[0]`). `@($null).Count` is `0`
+and `@($scalar).Count` is `1`, so the `-and $x` null-guard is no longer needed:
+```powershell
+# before (fragile)
+if ($existingConn -and $existingConn.Count -gt 0) { $existingConn[0] }
+# after (array-safe)
+if (@($existingConn).Count -gt 0) { @($existingConn)[0] }
+```
+Applied to all six call sites (soft-delete purge, both role-assignment helpers,
+the two per-project connection checks, and the `.env` connection-name lookup).
+
+**Lesson:** Under StrictMode in PS 5.1, never call `.Count`/`.Length` directly
+on a value that *might* be a scalar — `ConvertFrom-Json` may unwrap a
+single-element result into a scalar on some PS 5.1 builds (and keep it as an
+array on others). Always wrap in `@(...)` to normalise to an array first.
+"Works on my machine" here was **not** data luck — it was a *PowerShell build*
+difference: our 5.1 build never unwraps single results, so no count of
+connections could trigger it locally. Test idempotent guards against the 0-, 1-,
+and N-result cases **and** assume `ConvertFrom-Json` may hand you a scalar.
+
+---
+
 ## Part 2 — Code changes summary
 
 ### `setup/deploy.ps1`
@@ -742,6 +806,9 @@ qa v1 (`idx_bls_corpus`).
   after each deploy. Sustainable fix = add Content-Type to both `az rest`
   PUTs, drop `--output none 2>$null`, and add the project-MI + RBAC + AAD
   block.)
+- Fix for **#21**: all six `.Count` guards over `ConvertFrom-Json` output now
+  use array-safe `@($x).Count` (and `@($x)[0]`) so single-result scalars don't
+  throw under `Set-StrictMode` in PS 5.1.
 
 ### `app/scripts/deploy_agents.py`
 - Fix for **#4**: import path / sys.path layout.
