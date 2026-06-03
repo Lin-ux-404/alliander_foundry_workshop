@@ -396,6 +396,7 @@ if ($storageExists) {
         --location $Location `
         --sku Standard_LRS `
         --kind StorageV2 `
+        --min-tls-version TLS1_2 `
         --output none
     Write-Ok "Created"
 }

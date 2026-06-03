@@ -669,6 +669,72 @@ reviewer v3, qa v1.
 
 ---
 
+### #20 — `create_version` 404s transiently on a freshly provisioned project (eventual-consistency write lag)
+**Where:** `app/scripts/deploy_agents.py`,
+`project.agents.create_version(...)` (and, less often, the
+`project.connections.list()` resolver), run shortly after a clean deploy where
+the capability hosts (#19) already exist and report `Succeeded`.
+
+**Symptom:** The first data-plane write fails:
+```
+azure.core.exceptions.ResourceNotFoundError: (NotFound) Project not found
+Code: NotFound
+Message: Project not found
+```
+…even though, at the same moment:
+- both capability hosts report `provisioningState = "Succeeded"`,
+- the raw data plane is reachable
+  (`GET .../agents?api-version=v1` already lists the agents), and
+- `project.connections.list()` returns the connections (HTTP 200, verified via
+  `logging_enable=True`).
+
+Re-inspecting after the throw shows the write **did** land server-side: all four
+agents exist at their expected versions. The matcher had accumulated 8 versions
+precisely because each failed-looking retry actually created a new version.
+
+**Root cause:** This is the **write-path** tail of the same eventual-consistency
+window described in #18/#19, isolated to the agent service. After a fresh
+(re)provision, the *read* routes (`connections.list`, `agents.list`) catch up
+first; the `create_version` *write* route briefly still resolves the project on a
+replica that 404s with `"Project not found"`. The write often commits anyway, so
+the SDK exception is misleading. Unlike #19 (a permanent, missing-capability-host
+failure), this self-heals within seconds.
+
+**Fix (official Azure transient-fault guidance):** wrap the eventually-consistent
+data-plane calls in **retry with exponential backoff** — the documented pattern
+in [Recommendations for handling transient faults](https://learn.microsoft.com/azure/well-architected/reliability/handle-transient-faults)
+and the Azure AI Search reliability guidance ("use a retry strategy with
+exponential backoffs for both read and write operations"). Added a `_with_retry`
+helper in `deploy_agents.py` that retries **only** on a 404 whose message
+contains `"project not found"`, backing off `5 → 10 → 20 → 40 → 80s` (max 6
+attempts), and applied it to both the connection resolver and each
+`create_version` call:
+```python
+def _with_retry(label, fn):
+    for attempt in range(1, _MAX_RETRIES + 1):
+        try:
+            return fn()
+        except HttpResponseError as e:
+            transient = e.status_code == 404 and "project not found" in str(e).lower()
+            if not transient or attempt == _MAX_RETRIES:
+                raise
+            time.sleep(_BASE_DELAY_SEC * (2 ** (attempt - 1)))
+```
+
+**Result:** Deploy now self-recovers — one transient 404 on the first agent, then
+`EXIT=0`: retriever v3 (`idx_bls_corpus`), matcher v8 (no index), reviewer v3,
+qa v1 (`idx_bls_corpus`).
+
+**Lesson:**
+- On a freshly provisioned Foundry project, treat the **first write** as
+  eventually consistent even when reads already succeed and the capability hosts
+  are `Succeeded`. Don't assume a 404 means the write failed — verify with
+  `agents.list()`.
+- Scope the retry tightly (only 404 + `"project not found"`) so genuine
+  not-found / auth / schema errors still fail fast instead of looping.
+
+---
+
 ## Part 2 — Code changes summary
 
 ### `setup/deploy.ps1`
@@ -681,6 +747,9 @@ reviewer v3, qa v1.
 - Fix for **#4**: import path / sys.path layout.
 - Fix for **#7**: `_search_tools` collapses to one tool / one index per agent;
   returns `[]` when an agent has no indexes (matcher post-refactor).
+- Fix for **#20**: `_with_retry` exponential-backoff wrapper around the
+  eventually-consistent `connections.list()` resolver and each
+  `create_version` call; retries only on a 404 + `"project not found"`.
 
 ### `app/scripts/index_documents.py`
 - Fix for **#11**: regex captures variant suffix; `_normalize_vwi_code`
