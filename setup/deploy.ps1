@@ -64,12 +64,26 @@ function Invoke-Az {
     # 5.1 turns ANY native stderr write into a terminating NativeCommandError —
     # so a harmless TLS-deprecation warning would crash an otherwise-successful
     # create. Decide success/failure from the real exit code only.
-    $ErrorActionPreference = 'Continue'
-    $result = az @Args_ 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    #
+    # Retry logic: Windows ephemeral port exhaustion (WinError 10048) is common
+    # when scripts make many rapid az CLI calls. Each call opens a new HTTPS
+    # connection; closed sockets sit in TIME_WAIT for ~2 min, eventually
+    # exhausting the pool. Retry with backoff on connection errors.
+    $maxAttempts = 3
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $ErrorActionPreference = 'Continue'
+        $result = az @Args_ 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return $result
+        }
+        $msg = "$result"
+        if ($msg -match 'WinError 10048|ephemeral|NewConnectionError|Max retries exceeded' -and $attempt -lt $maxAttempts) {
+            Write-Host "   ⚠️  Connection error (attempt $attempt/$maxAttempts), waiting 30s for ports to free..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 30
+            continue
+        }
         throw "az command failed: $result"
     }
-    return $result
 }
 
 # Probe helper for "does this resource already exist?" reads. Windows PowerShell
@@ -77,12 +91,24 @@ function Invoke-Az {
 # whenever $ErrorActionPreference is 'Stop' — even with `2>$null`. We deliberately
 # drop the Stop preference in this function's local scope so a missing resource
 # returns $null instead of crashing the script. (pwsh 7 doesn't have this quirk.)
+#
+# Same retry logic as Invoke-Az for transient connection errors.
 function Get-AzOrNull {
     param([Parameter(ValueFromRemainingArguments)] $Args_)
-    $ErrorActionPreference = 'SilentlyContinue'
-    $out = az @Args_ 2>$null
-    if ($LASTEXITCODE -ne 0) { return $null }
-    return $out
+    $maxAttempts = 3
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $ErrorActionPreference = 'SilentlyContinue'
+        $out = az @Args_ 2>$null
+        if ($LASTEXITCODE -eq 0) { return $out }
+        $msg = "$out"
+        if ($msg -match 'WinError 10048|ephemeral|NewConnectionError|Max retries exceeded' -and $attempt -lt $maxAttempts) {
+            Write-Host "   ⚠️  Connection error (attempt $attempt/$maxAttempts), waiting 30s for ports to free..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 30
+            continue
+        }
+        return $null
+    }
+    return $null
 }
 
 # ── Derived names ────────────────────────────────────────────────────────────
@@ -215,7 +241,8 @@ if ($foundryExists) {
     # Azure AI Services accounts are SOFT-DELETED (not purged) when their RG is
     # deleted. Recreating with the same name fails with FlagMustBeSetForRestore
     # until the soft-deleted account is purged. Purge any matching ghost first.
-    $deleted = Get-AzOrNull cognitiveservices account list-deleted --query "[?name=='$foundryName']" --output json | ConvertFrom-Json
+    $deletedRaw = Get-AzOrNull cognitiveservices account list-deleted --query "[?name=='$foundryName']" --output json
+    $deleted = if ($deletedRaw) { $deletedRaw | ConvertFrom-Json } else { @() }
     if (@($deleted).Count -gt 0) {
         Write-Host "   ⚙️  Purging soft-deleted account of the same name..." -ForegroundColor Yellow
         Invoke-Az cognitiveservices account purge `
@@ -235,6 +262,41 @@ if ($foundryExists) {
         --yes `
         --output none
     Write-Ok "Created"
+
+    # Wait for the account to fully provision before creating child resources.
+    # Without this, project creation fails with "Parent account does not provision correctly".
+    Write-Host "   ⏳ Waiting for Foundry account provisioning..." -ForegroundColor Yellow
+    do {
+        Start-Sleep -Seconds 10
+        $provState = az cognitiveservices account show --name $foundryName --resource-group $rgName --query "properties.provisioningState" --output tsv 2>$null
+    } while ($provState -ne "Succeeded")
+    Write-Ok "Foundry account provisioning complete"
+}
+
+# Always verify the account is fully provisioned before proceeding.
+# Even a pre-existing account can be stuck in a non-Succeeded state
+# (e.g. after a partial deploy), causing project creation to fail with
+# "Parent account does not provision correctly".
+$provState = az cognitiveservices account show --name $foundryName --resource-group $rgName --query "properties.provisioningState" --output tsv 2>$null
+if ($provState -ne "Succeeded") {
+    Write-Host "   ⏳ Account provisioning state: $provState — waiting..." -ForegroundColor Yellow
+    $maxRetries = 30   # 30 × 10s = 5 min max wait
+    $retries = 0
+    do {
+        Start-Sleep -Seconds 10
+        $retries++
+        $provState = az cognitiveservices account show --name $foundryName --resource-group $rgName --query "properties.provisioningState" --output tsv 2>$null
+        if ($provState) { $provState = $provState.Trim() }
+        if (-not $provState) {
+            Write-Host "   ⚠️  Empty response from az (retry $retries/$maxRetries)..." -ForegroundColor Yellow
+        } else {
+            Write-Host "   ⏳ Provisioning state: $provState (attempt $retries/$maxRetries)" -ForegroundColor Yellow
+        }
+    } while ($provState -ne "Succeeded" -and $retries -lt $maxRetries)
+    if ($provState -ne "Succeeded") {
+        throw "Foundry account provisioning failed after $maxRetries attempts. Last state: '$provState'"
+    }
+    Write-Ok "Foundry account provisioning complete"
 }
 
 # Get Foundry managed identity
@@ -286,11 +348,12 @@ function Ensure-CapabilityHost {
     param([string]$ScopeResourceId, [string]$Label)
     $hostUrlBase = "https://management.azure.com$ScopeResourceId/capabilityHosts/agentshost"
     $existing = Get-AzOrNull rest --method get --url "$hostUrlBase`?api-version=2025-04-01-preview" --query "properties.provisioningState" --output tsv
+    if ($existing) { $existing = $existing.Trim() }
     if ($existing -eq "Succeeded") {
         Write-Skip "$Label capability host exists"
         return
     }
-    if (-not $existing) {
+    if (-not $existing -or $existing -eq "NotFound") {
         $body = '{"properties":{"capabilityHostKind":"Agents"}}'
         $f = [System.IO.Path]::GetTempFileName()
         Set-Content -Path $f -Value $body -Encoding UTF8
@@ -298,15 +361,22 @@ function Ensure-CapabilityHost {
             --body "@$f" --headers "Content-Type=application/json" --output none
         Remove-Item $f
     }
-    # Poll until provisioning completes
+    # Poll until provisioning completes (tolerate empty responses from port exhaustion)
+    $maxRetries = 30
+    $retries = 0
     do {
         Start-Sleep -Seconds 10
+        $retries++
         $state = Get-AzOrNull rest --method get --url "$hostUrlBase`?api-version=2025-04-01-preview" --query "properties.provisioningState" --output tsv
-    } while ($state -eq "Creating")
+        if ($state) { $state = $state.Trim() }
+        if (-not $state) {
+            Write-Host "   ⚠️  Empty response polling $Label capability host (retry $retries/$maxRetries)..." -ForegroundColor Yellow
+        }
+    } while ($state -ne "Succeeded" -and $state -ne "Failed" -and $retries -lt $maxRetries)
     if ($state -eq "Succeeded") {
         Write-Ok "$Label capability host ready"
     } else {
-        throw "$Label capability host provisioning failed: $state"
+        throw "$Label capability host provisioning failed after $retries attempts. Last state: '$state'"
     }
 }
 
