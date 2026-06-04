@@ -599,6 +599,10 @@ function Write-EnvFile {
 FOUNDRY_PROJECT_ENDPOINT=$endpoint
 FOUNDRY_MODEL=gpt-5.4-mini
 
+# Observability & Evaluation labs
+TENANT_ID=$tenantId
+APPLICATIONINSIGHTS_CONNECTION_STRING=$aiConnectionString
+
 # Azure AI Search
 AZURE_SEARCH_ENDPOINT=$searchEndpoint
 AZURE_SEARCH_ADMIN_KEY=$searchAdminKey
