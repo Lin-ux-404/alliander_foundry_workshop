@@ -503,7 +503,8 @@ function Ensure-RoleAssignment {
         [string]$Scope,
         [string]$Label
     )
-    $existing = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json | ConvertFrom-Json
+    $raw = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json
+    $existing = if ($raw) { $raw | ConvertFrom-Json } else { @() }
     if (@($existing).Count -gt 0) {
         Write-Skip "$Label → $Role (exists)"
     } else {
@@ -524,7 +525,8 @@ function Ensure-UserRoleAssignment {
         [string]$Scope,
         [string]$Label
     )
-    $existing = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json | ConvertFrom-Json
+    $raw = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json
+    $existing = if ($raw) { $raw | ConvertFrom-Json } else { @() }
     if (@($existing).Count -gt 0) {
         Write-Skip "$Label → $Role (exists)"
     } else {
@@ -609,7 +611,8 @@ foreach ($projName in $projectNames) {
     $projApiBase = "https://management.azure.com$projResId"
 
     # Search connection
-    $existingConn = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='CognitiveSearch'].name" --output json | ConvertFrom-Json
+    $connRaw = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='CognitiveSearch'].name" --output json
+    $existingConn = if ($connRaw) { $connRaw | ConvertFrom-Json } else { @() }
     if (@($existingConn).Count -gt 0) {
         $actualSearchConn = $existingConn[0]
         Write-Skip "$projName → Search connection exists: $actualSearchConn"
@@ -631,7 +634,8 @@ foreach ($projName in $projectNames) {
     }
 
     # AppInsights connection
-    $existingAiConn = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='AppInsights'].name" --output json | ConvertFrom-Json
+    $aiConnRaw = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='AppInsights'].name" --output json
+    $existingAiConn = if ($aiConnRaw) { $aiConnRaw | ConvertFrom-Json } else { @() }
     if (@($existingAiConn).Count -gt 0) {
         Write-Skip "$projName → AppInsights connection exists: $($existingAiConn[0])"
     } else {
