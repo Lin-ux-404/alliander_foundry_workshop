@@ -618,19 +618,20 @@ foreach ($projName in $projectNames) {
         Write-Skip "$projName → Search connection exists: $actualSearchConn"
     } else {
         $actualSearchConn = $searchConnName
-        # Failure mode #2: this PUT MUST include Content-Type or ARM returns
-        # HTTP 415. Pass the body via temp file + header (same pattern as the
-        # project-create PUT in section 3). Use Invoke-Az so a 415 throws
-        # instead of being swallowed by `2>$null --output none`.
         $searchConnFile = [System.IO.Path]::GetTempFileName()
         Set-Content -Path $searchConnFile -Value $searchConnBody -Encoding UTF8
-        Invoke-Az rest --method put `
-            --url "$projApiBase/connections/$($searchConnName)?api-version=$apiVersion" `
-            --body "@$searchConnFile" `
-            --headers "Content-Type=application/json" `
-            --output none
-        Remove-Item $searchConnFile
-        Write-Ok "$projName → Search connection: $searchConnName"
+        try {
+            Invoke-Az rest --method put `
+                --url "$projApiBase/connections/$($searchConnName)?api-version=$apiVersion" `
+                --body "@$searchConnFile" `
+                --headers "Content-Type=application/json" `
+                --output none
+            Write-Ok "$projName → Search connection: $searchConnName"
+        } catch {
+            if ($_.Exception.Message -match 'already exist') {
+                Write-Skip "$projName → Search connection already exists (created externally)"
+            } else { throw }
+        } finally { Remove-Item $searchConnFile -ErrorAction SilentlyContinue }
     }
 
     # AppInsights connection
@@ -639,16 +640,20 @@ foreach ($projName in $projectNames) {
     if (@($existingAiConn).Count -gt 0) {
         Write-Skip "$projName → AppInsights connection exists: $($existingAiConn[0])"
     } else {
-        # Failure mode #2: same Content-Type requirement as the Search connection.
         $aiConnFile = [System.IO.Path]::GetTempFileName()
         Set-Content -Path $aiConnFile -Value $aiConnBody -Encoding UTF8
-        Invoke-Az rest --method put `
-            --url "$projApiBase/connections/$($aiConnName)?api-version=$apiVersion" `
-            --body "@$aiConnFile" `
-            --headers "Content-Type=application/json" `
-            --output none
-        Remove-Item $aiConnFile
-        Write-Ok "$projName → AppInsights connection: $aiConnName"
+        try {
+            Invoke-Az rest --method put `
+                --url "$projApiBase/connections/$($aiConnName)?api-version=$apiVersion" `
+                --body "@$aiConnFile" `
+                --headers "Content-Type=application/json" `
+                --output none
+            Write-Ok "$projName → AppInsights connection: $aiConnName"
+        } catch {
+            if ($_.Exception.Message -match 'already exist') {
+                Write-Skip "$projName → AppInsights connection already exists (created externally)"
+            } else { throw }
+        } finally { Remove-Item $aiConnFile -ErrorAction SilentlyContinue }
     }
 
     # Store connection name for .env generation
