@@ -44,16 +44,32 @@ DOCS_ROOT = Path(__file__).parent.parent / "docs"
 INDEX_NAME = os.getenv("AZURE_SEARCH_INDEX", "idx_bls_corpus")
 BATCH_SIZE = 50
 
-_VWI_CODE_RE = re.compile(r"\bE-\d{2}\b", re.IGNORECASE)
+# Capture the base code AND optional variant suffix (onder-sp / sp-loos).
+# Filenames use either "-" or "_" as separator before the suffix.
+_VWI_CODE_RE = re.compile(
+    r"\bE[-_]\d{2}(?:[-_](?:onder[-_]sp|sp[-_]loos))?\b",
+    re.IGNORECASE,
+)
+
+
+def _normalize_vwi_code(raw: str) -> str:
+    # Canonical form: uppercase letter, hyphen separators, lowercase suffix.
+    s = raw.upper().replace("_", "-")
+    parts = s.split("-")
+    # parts[0] = "E", parts[1] = "22", parts[2:] = optional ["ONDER","SP"] or ["SP","LOOS"]
+    if len(parts) <= 2:
+        return f"{parts[0]}-{parts[1]}"
+    suffix = "-".join(p.lower() for p in parts[2:])
+    return f"{parts[0]}-{parts[1]}-{suffix}"
 
 
 def _infer_vwi_code(filename: str, text_sample: str) -> str:
     m = _VWI_CODE_RE.search(filename)
     if m:
-        return m.group(0).upper()
+        return _normalize_vwi_code(m.group(0))
     m = _VWI_CODE_RE.search(text_sample)
     if m:
-        return m.group(0).upper()
+        return _normalize_vwi_code(m.group(0))
     return ""
 
 

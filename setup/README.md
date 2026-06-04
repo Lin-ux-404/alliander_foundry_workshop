@@ -44,7 +44,7 @@ Each project gets its own system-assigned managed identity, connections, and `.e
 |----------------------------|---------------------------|--------------|------------------|----------------|
 | `gpt-5.4-mini`            | gpt-5.4-mini              | 2026-03-17   | GlobalStandard   | 1 000          |
 | `text-embedding-ada-002`  | text-embedding-ada-002    | 2             | GlobalStandard   | 656            |
-| `gpt-4.1-mini`            | gpt-4.1-mini              | 2025-04-14   | GlobalStandard   | 8 000          |
+| `gpt-4.1-mini`            | gpt-4.1-mini              | 2025-04-14   | GlobalStandard   | 5 000          |
 
 All models are shared across projects (deployed at the account level).
 
@@ -95,10 +95,12 @@ All models are shared across projects (deployed at the account level).
 
 Each Foundry project gets two connections created via the Management API:
 
-| Connection          | Category          | Auth  | Purpose                                     |
-|---------------------|-------------------|-------|---------------------------------------------|
-| `search-connection` | CognitiveSearch   | AAD   | Agents can access AI Search indexes          |
-| `appinsights-connection` | AppInsights  | AAD   | Tracing and telemetry from agent runs        |
+| Connection          | Category          | Auth   | Purpose                                     |
+|---------------------|-------------------|--------|---------------------------------------------|
+| `search-connection` | CognitiveSearch   | AAD    | Agents can access AI Search indexes          |
+| `appinsights-connection` | AppInsights  | ApiKey | Tracing and telemetry from agent runs        |
+
+> The AppInsights connection must use `ApiKey` auth (the App Insights connection string as the key). The category rejects `AAD` with HTTP 400.
 
 ## Generated `.env` Files
 
@@ -112,7 +114,8 @@ To switch the active project (multi-project): copy `.env.{project-name}` to `.en
 ## Next Steps After Deployment
 
 ```bash
-# 1. Index data into AI Search
+# 1. Index the BLS corpus into AI Search AND upload the lookup data
+#    (crew, raamopdrachten, incidents) to Blob Storage
 python app/scripts/setup_search.py --all
 
 # 2. Deploy Foundry agents
@@ -124,3 +127,6 @@ cd app/backend && uvicorn main:app --reload
 # 4. Start the frontend
 cd app/frontend && npm run dev
 ```
+
+> `setup_search.py --all` indexes the BLS corpus **and** uploads the structured
+> lookup tables to Blob Storage. Use `--documents` or `--blob` to run just one half.

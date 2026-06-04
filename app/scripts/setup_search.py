@@ -1,12 +1,18 @@
 """
 setup_search.py
-Orchestrates the creation and population of all Azure AI Search indexes.
+Orchestrates the creation and population of the Azure AI Search index, plus
+the upload of the structured lookup tables (crew, raamopdrachten, incidents)
+to Blob Storage.
+
+Only the BEI-BLS rulebook corpus is indexed (idx_bls_corpus). Crew and
+raamopdrachten are small structured tables served from Blob Storage and
+queried deterministically in Python — they are deliberately NOT indexed
+(see docs/CONTEXT.md §2 and FAILURE_MODES.md #6/#7).
 
 Usage:
-  python scripts/setup_search.py --all
-  python scripts/setup_search.py --documents
-  python scripts/setup_search.py --crew
-  python scripts/setup_search.py --raamopdrachten
+  python scripts/setup_search.py --all         # index BLS corpus + upload blob data
+  python scripts/setup_search.py --documents   # index BLS corpus only
+  python scripts/setup_search.py --blob         # upload blob data only
 """
 from __future__ import annotations
 
@@ -14,19 +20,17 @@ import argparse
 import sys
 
 import index_documents
-import index_crew
-import index_raamopdrachten
+import upload_crew_data
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Set up Azure AI Search indexes for DRAAD.")
-    parser.add_argument("--all", action="store_true", help="Create and populate all indexes.")
-    parser.add_argument("--documents", action="store_true", help="Index VWI PDF documents.")
-    parser.add_argument("--crew", action="store_true", help="Index crew records.")
-    parser.add_argument("--raamopdrachten", action="store_true", help="Index raamopdrachten records.")
+    parser = argparse.ArgumentParser(description="Set up the Azure AI Search index for DRAAD.")
+    parser.add_argument("--all", action="store_true", help="Index the BLS corpus AND upload blob data.")
+    parser.add_argument("--documents", action="store_true", help="Index VWI PDF documents (idx_bls_corpus).")
+    parser.add_argument("--blob", action="store_true", help="Upload crew/raamopdrachten/incidents JSON to Blob Storage.")
     args = parser.parse_args()
 
-    if not any([args.all, args.documents, args.crew, args.raamopdrachten]):
+    if not any([args.all, args.documents, args.blob]):
         parser.print_help()
         sys.exit(1)
 
@@ -34,13 +38,9 @@ def main() -> None:
         print("\n=== Indexing VWI documents (idx_bls_corpus) ===")
         index_documents.main()
 
-    if args.all or args.raamopdrachten:
-        print("\n=== Indexing raamopdrachten (idx_raamopdrachten) ===")
-        index_raamopdrachten.main()
-
-    if args.all or args.crew:
-        print("\n=== Indexing crew (idx_crew) ===")
-        index_crew.main()
+    if args.all or args.blob:
+        print("\n=== Uploading lookup data to Blob Storage (crew-data) ===")
+        upload_crew_data.run()
 
     print("\n✅ Search setup complete.")
 
