@@ -64,12 +64,26 @@ function Invoke-Az {
     # 5.1 turns ANY native stderr write into a terminating NativeCommandError —
     # so a harmless TLS-deprecation warning would crash an otherwise-successful
     # create. Decide success/failure from the real exit code only.
-    $ErrorActionPreference = 'Continue'
-    $result = az @Args_ 2>&1
-    if ($LASTEXITCODE -ne 0) {
+    #
+    # Retry logic: Windows ephemeral port exhaustion (WinError 10048) is common
+    # when scripts make many rapid az CLI calls. Each call opens a new HTTPS
+    # connection; closed sockets sit in TIME_WAIT for ~2 min, eventually
+    # exhausting the pool. Retry with backoff on connection errors.
+    $maxAttempts = 3
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $ErrorActionPreference = 'Continue'
+        $result = az @Args_ 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            return $result
+        }
+        $msg = "$result"
+        if ($msg -match 'WinError 10048|ephemeral|NewConnectionError|Max retries exceeded' -and $attempt -lt $maxAttempts) {
+            Write-Host "   ⚠️  Connection error (attempt $attempt/$maxAttempts), waiting 30s for ports to free..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 30
+            continue
+        }
         throw "az command failed: $result"
     }
-    return $result
 }
 
 # Probe helper for "does this resource already exist?" reads. Windows PowerShell
@@ -77,12 +91,24 @@ function Invoke-Az {
 # whenever $ErrorActionPreference is 'Stop' — even with `2>$null`. We deliberately
 # drop the Stop preference in this function's local scope so a missing resource
 # returns $null instead of crashing the script. (pwsh 7 doesn't have this quirk.)
+#
+# Same retry logic as Invoke-Az for transient connection errors.
 function Get-AzOrNull {
     param([Parameter(ValueFromRemainingArguments)] $Args_)
-    $ErrorActionPreference = 'SilentlyContinue'
-    $out = az @Args_ 2>$null
-    if ($LASTEXITCODE -ne 0) { return $null }
-    return $out
+    $maxAttempts = 3
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $ErrorActionPreference = 'SilentlyContinue'
+        $out = az @Args_ 2>$null
+        if ($LASTEXITCODE -eq 0) { return $out }
+        $msg = "$out"
+        if ($msg -match 'WinError 10048|ephemeral|NewConnectionError|Max retries exceeded' -and $attempt -lt $maxAttempts) {
+            Write-Host "   ⚠️  Connection error (attempt $attempt/$maxAttempts), waiting 30s for ports to free..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 30
+            continue
+        }
+        return $null
+    }
+    return $null
 }
 
 # ── Derived names ────────────────────────────────────────────────────────────
@@ -215,7 +241,8 @@ if ($foundryExists) {
     # Azure AI Services accounts are SOFT-DELETED (not purged) when their RG is
     # deleted. Recreating with the same name fails with FlagMustBeSetForRestore
     # until the soft-deleted account is purged. Purge any matching ghost first.
-    $deleted = Get-AzOrNull cognitiveservices account list-deleted --query "[?name=='$foundryName']" --output json | ConvertFrom-Json
+    $deletedRaw = Get-AzOrNull cognitiveservices account list-deleted --query "[?name=='$foundryName']" --output json
+    $deleted = if ($deletedRaw) { $deletedRaw | ConvertFrom-Json } else { @() }
     if (@($deleted).Count -gt 0) {
         Write-Host "   ⚙️  Purging soft-deleted account of the same name..." -ForegroundColor Yellow
         Invoke-Az cognitiveservices account purge `
@@ -235,6 +262,41 @@ if ($foundryExists) {
         --yes `
         --output none
     Write-Ok "Created"
+
+    # Wait for the account to fully provision before creating child resources.
+    # Without this, project creation fails with "Parent account does not provision correctly".
+    Write-Host "   ⏳ Waiting for Foundry account provisioning..." -ForegroundColor Yellow
+    do {
+        Start-Sleep -Seconds 10
+        $provState = az cognitiveservices account show --name $foundryName --resource-group $rgName --query "properties.provisioningState" --output tsv 2>$null
+    } while ($provState -ne "Succeeded")
+    Write-Ok "Foundry account provisioning complete"
+}
+
+# Always verify the account is fully provisioned before proceeding.
+# Even a pre-existing account can be stuck in a non-Succeeded state
+# (e.g. after a partial deploy), causing project creation to fail with
+# "Parent account does not provision correctly".
+$provState = az cognitiveservices account show --name $foundryName --resource-group $rgName --query "properties.provisioningState" --output tsv 2>$null
+if ($provState -ne "Succeeded") {
+    Write-Host "   ⏳ Account provisioning state: $provState — waiting..." -ForegroundColor Yellow
+    $maxRetries = 30   # 30 × 10s = 5 min max wait
+    $retries = 0
+    do {
+        Start-Sleep -Seconds 10
+        $retries++
+        $provState = az cognitiveservices account show --name $foundryName --resource-group $rgName --query "properties.provisioningState" --output tsv 2>$null
+        if ($provState) { $provState = $provState.Trim() }
+        if (-not $provState) {
+            Write-Host "   ⚠️  Empty response from az (retry $retries/$maxRetries)..." -ForegroundColor Yellow
+        } else {
+            Write-Host "   ⏳ Provisioning state: $provState (attempt $retries/$maxRetries)" -ForegroundColor Yellow
+        }
+    } while ($provState -ne "Succeeded" -and $retries -lt $maxRetries)
+    if ($provState -ne "Succeeded") {
+        throw "Foundry account provisioning failed after $maxRetries attempts. Last state: '$provState'"
+    }
+    Write-Ok "Foundry account provisioning complete"
 }
 
 # Get Foundry managed identity
@@ -286,11 +348,12 @@ function Ensure-CapabilityHost {
     param([string]$ScopeResourceId, [string]$Label)
     $hostUrlBase = "https://management.azure.com$ScopeResourceId/capabilityHosts/agentshost"
     $existing = Get-AzOrNull rest --method get --url "$hostUrlBase`?api-version=2025-04-01-preview" --query "properties.provisioningState" --output tsv
+    if ($existing) { $existing = $existing.Trim() }
     if ($existing -eq "Succeeded") {
         Write-Skip "$Label capability host exists"
         return
     }
-    if (-not $existing) {
+    if (-not $existing -or $existing -eq "NotFound") {
         $body = '{"properties":{"capabilityHostKind":"Agents"}}'
         $f = [System.IO.Path]::GetTempFileName()
         Set-Content -Path $f -Value $body -Encoding UTF8
@@ -298,15 +361,22 @@ function Ensure-CapabilityHost {
             --body "@$f" --headers "Content-Type=application/json" --output none
         Remove-Item $f
     }
-    # Poll until provisioning completes
+    # Poll until provisioning completes (tolerate empty responses from port exhaustion)
+    $maxRetries = 30
+    $retries = 0
     do {
         Start-Sleep -Seconds 10
+        $retries++
         $state = Get-AzOrNull rest --method get --url "$hostUrlBase`?api-version=2025-04-01-preview" --query "properties.provisioningState" --output tsv
-    } while ($state -eq "Creating")
+        if ($state) { $state = $state.Trim() }
+        if (-not $state) {
+            Write-Host "   ⚠️  Empty response polling $Label capability host (retry $retries/$maxRetries)..." -ForegroundColor Yellow
+        }
+    } while ($state -ne "Succeeded" -and $state -ne "Failed" -and $retries -lt $maxRetries)
     if ($state -eq "Succeeded") {
         Write-Ok "$Label capability host ready"
     } else {
-        throw "$Label capability host provisioning failed: $state"
+        throw "$Label capability host provisioning failed after $retries attempts. Last state: '$state'"
     }
 }
 
@@ -433,7 +503,8 @@ function Ensure-RoleAssignment {
         [string]$Scope,
         [string]$Label
     )
-    $existing = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json | ConvertFrom-Json
+    $raw = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json
+    $existing = if ($raw) { $raw | ConvertFrom-Json } else { @() }
     if (@($existing).Count -gt 0) {
         Write-Skip "$Label → $Role (exists)"
     } else {
@@ -454,7 +525,8 @@ function Ensure-UserRoleAssignment {
         [string]$Scope,
         [string]$Label
     )
-    $existing = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json | ConvertFrom-Json
+    $raw = Get-AzOrNull role assignment list --assignee $PrincipalId --role $Role --scope $Scope --output json
+    $existing = if ($raw) { $raw | ConvertFrom-Json } else { @() }
     if (@($existing).Count -gt 0) {
         Write-Skip "$Label → $Role (exists)"
     } else {
@@ -539,42 +611,49 @@ foreach ($projName in $projectNames) {
     $projApiBase = "https://management.azure.com$projResId"
 
     # Search connection
-    $existingConn = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='CognitiveSearch'].name" --output json | ConvertFrom-Json
+    $connRaw = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='CognitiveSearch'].name" --output json
+    $existingConn = if ($connRaw) { $connRaw | ConvertFrom-Json } else { @() }
     if (@($existingConn).Count -gt 0) {
         $actualSearchConn = $existingConn[0]
         Write-Skip "$projName → Search connection exists: $actualSearchConn"
     } else {
         $actualSearchConn = $searchConnName
-        # Failure mode #2: this PUT MUST include Content-Type or ARM returns
-        # HTTP 415. Pass the body via temp file + header (same pattern as the
-        # project-create PUT in section 3). Use Invoke-Az so a 415 throws
-        # instead of being swallowed by `2>$null --output none`.
         $searchConnFile = [System.IO.Path]::GetTempFileName()
         Set-Content -Path $searchConnFile -Value $searchConnBody -Encoding UTF8
-        Invoke-Az rest --method put `
-            --url "$projApiBase/connections/$($searchConnName)?api-version=$apiVersion" `
-            --body "@$searchConnFile" `
-            --headers "Content-Type=application/json" `
-            --output none
-        Remove-Item $searchConnFile
-        Write-Ok "$projName → Search connection: $searchConnName"
+        try {
+            Invoke-Az rest --method put `
+                --url "$projApiBase/connections/$($searchConnName)?api-version=$apiVersion" `
+                --body "@$searchConnFile" `
+                --headers "Content-Type=application/json" `
+                --output none
+            Write-Ok "$projName → Search connection: $searchConnName"
+        } catch {
+            if ($_.Exception.Message -match 'already exist') {
+                Write-Skip "$projName → Search connection already exists (created externally)"
+            } else { throw }
+        } finally { Remove-Item $searchConnFile -ErrorAction SilentlyContinue }
     }
 
     # AppInsights connection
-    $existingAiConn = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='AppInsights'].name" --output json | ConvertFrom-Json
+    $aiConnRaw = Get-AzOrNull rest --method get --url "$projApiBase/connections?api-version=$apiVersion" --query "value[?properties.category=='AppInsights'].name" --output json
+    $existingAiConn = if ($aiConnRaw) { $aiConnRaw | ConvertFrom-Json } else { @() }
     if (@($existingAiConn).Count -gt 0) {
         Write-Skip "$projName → AppInsights connection exists: $($existingAiConn[0])"
     } else {
-        # Failure mode #2: same Content-Type requirement as the Search connection.
         $aiConnFile = [System.IO.Path]::GetTempFileName()
         Set-Content -Path $aiConnFile -Value $aiConnBody -Encoding UTF8
-        Invoke-Az rest --method put `
-            --url "$projApiBase/connections/$($aiConnName)?api-version=$apiVersion" `
-            --body "@$aiConnFile" `
-            --headers "Content-Type=application/json" `
-            --output none
-        Remove-Item $aiConnFile
-        Write-Ok "$projName → AppInsights connection: $aiConnName"
+        try {
+            Invoke-Az rest --method put `
+                --url "$projApiBase/connections/$($aiConnName)?api-version=$apiVersion" `
+                --body "@$aiConnFile" `
+                --headers "Content-Type=application/json" `
+                --output none
+            Write-Ok "$projName → AppInsights connection: $aiConnName"
+        } catch {
+            if ($_.Exception.Message -match 'already exist') {
+                Write-Skip "$projName → AppInsights connection already exists (created externally)"
+            } else { throw }
+        } finally { Remove-Item $aiConnFile -ErrorAction SilentlyContinue }
     }
 
     # Store connection name for .env generation
