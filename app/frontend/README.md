@@ -1,36 +1,37 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# DRAAD frontend
 
-## Getting Started
+This Next.js application renders the DRAAD chat interface, Server-Sent Event
+pipeline progress, deterministic rule findings, citations and the final
+human-review or dispatch recommendation.
 
-First, run the development server:
+## Run locally
+
+Start the FastAPI backend on port 8000, then:
 
 ```bash
+npm ci
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`. During local development, `next.config.ts`
+proxies `/api/*` to `http://localhost:8000/api/*`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Validate and build
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run build
+npm run start
+```
 
-## Learn More
+The production server listens on port 3000 by default. The current rewrite is
+designed for the local workshop topology; update the backend destination in
+`next.config.ts` before deploying the frontend and API to separate hosts.
 
-To learn more about Next.js, take a look at the following resources:
+## Relevant files
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `app/page.tsx`: SSE client and conversation state.
+- `app/components/PipelineProgress.tsx`: live agent/rule progress.
+- `app/components/ResultCard.tsx`: structured dispatch result.
+- `app/types.ts`: frontend response contracts.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+The interface is a training aid. It does not authorize electrical work.

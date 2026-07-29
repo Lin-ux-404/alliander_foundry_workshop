@@ -8,12 +8,11 @@ Dispatch:    workflows.dispatch.run_dispatch_stream()
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from datetime import datetime
 
 from models.incident import IncidentPayload
 from models.responses import StepEvent
 from utils.intent import is_incident
-from utils.parsing import extract_anchors, parse_structured_input
+from utils.parsing import extract_anchors, new_incident_id, parse_structured_input
 from workflows.dispatch import run_dispatch_stream
 from workflows.qa import run_qa
 
@@ -48,7 +47,7 @@ async def run_chat_stream(user_message: str) -> AsyncGenerator[StepEvent, None]:
         return
 
     anchors = extract_anchors(user_message)
-    incident_id = f"INC-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    incident_id = new_incident_id()
     payload = IncidentPayload(
         free_text=user_message,
         anchors=anchors,

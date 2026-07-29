@@ -1,36 +1,33 @@
 """
 Tool: evaluate_rules
 Deterministic BEI-BLS rule gate. Validates a matcher proposal against the
-five hard rules from the briefing §6.3.
+five application safety rules.
 
 No LLM call — pure Python logic so the verdict is auditable and reproducible.
 """
 from __future__ import annotations
 
 import json
-import os
 from datetime import date, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-# Curated VWI catalogue — the set of VWI IDs that exist in idx_bls_corpus.
-# Any VWI referenced by the matcher must be in this set.
-CURATED_VWI_IDS = {
-    "E-04", "E-11", "E-22", "E-22-onder-sp", "E-22-sp-loos",
-    "E-40", "E-40-onder-sp", "E-40-sp-loos",
-    "E-48", "E-60", "E-66", "E-67", "E-85",
-}
-
-# Live-work VWI variants
-LIVE_WORK_VARIANTS = {"E-22-onder-sp", "E-40-onder-sp", "E-66"}
+from utils.vwi import is_live_work_vwi, load_indexed_vwi_ids, vwi_matches
 
 _DATA_DIR = Path(__file__).parent.parent.parent / "data"
+CURATED_VWI_IDS = load_indexed_vwi_ids()
 
 
 def _parse_date(value: str | None) -> date | None:
     if not value:
         return None
+    # Incident timestamps are normally ISO 8601 datetimes. The date prefix is
+    # sufficient for the inclusive RO validity window.
+    try:
+        return date.fromisoformat(value.strip()[:10])
+    except (TypeError, ValueError):
+        pass
     for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
         try:
             return datetime.strptime(value, fmt).date()
@@ -78,8 +75,13 @@ def evaluate_rules(proposal: dict[str, Any]) -> str:
     ro_db = list(_load_raamopdrachten())
 
     vwis = proposal.get("vwis", [])
-    vwi_ids = [v.get("vwi_id", "") for v in vwis]
-    confirmed_vwi_ids = [v.get("vwi_id", "") for v in vwis if v.get("confidence") == "confirmed"]
+    if not isinstance(vwis, list):
+        vwis = []
+    vwi_ids = [
+        v.get("vwi_id", "")
+        for v in vwis
+        if isinstance(v, dict) and isinstance(v.get("vwi_id", ""), str)
+    ]
     ro_id = proposal.get("matched_raamopdracht_id", "")
     postcode = proposal.get("postcode", "")
     incident_ts = proposal.get("incident_timestamp", "")
@@ -105,15 +107,18 @@ def evaluate_rules(proposal: dict[str, Any]) -> str:
     # This determines coverage_status (covered/partial/not_covered).
     if matched_ro:
         ro_covered = set(matched_ro.get("covered_vwi_ids", []))
-        uncovered = [v for v in vwi_ids if v and v not in ro_covered]
+        uncovered = [
+            v for v in vwi_ids
+            if v and not any(vwi_matches(v, covered) for covered in ro_covered)
+        ]
         verdicts.append({
             "rule_id": "BLS-R02",
             "pass": len(uncovered) == 0,
             "reason": (
-                f"Confirmed VWIs not in RO {ro_id} coverage: {uncovered}. "
+                f"Selected VWIs not in RO {ro_id} coverage: {uncovered}. "
                 f"RO covers: {sorted(ro_covered)}"
                 if uncovered
-                else f"All confirmed VWIs covered by RO {ro_id}."
+                else f"All selected VWIs covered by RO {ro_id}."
             ),
         })
     else:
@@ -125,12 +130,17 @@ def evaluate_rules(proposal: dict[str, Any]) -> str:
 
     # ---- BLS-R03: Temporal validity ----
     # Incident timestamp must fall within RO geldigheidsduur_start..end.
-    today = date.today()
-    incident_date = _parse_date(incident_ts) or today
+    incident_date = _parse_date(incident_ts) if incident_ts else date.today()
     if matched_ro:
         ro_start = _parse_date(matched_ro.get("geldigheidsduur_start"))
         ro_end = _parse_date(matched_ro.get("geldigheidsduur_end"))
-        if ro_start and ro_end:
+        if incident_date is None:
+            verdicts.append({
+                "rule_id": "BLS-R03",
+                "pass": False,
+                "reason": f"Invalid incident timestamp: {incident_ts!r}.",
+            })
+        elif ro_start and ro_end:
             in_range = ro_start <= incident_date <= ro_end
             verdicts.append({
                 "rule_id": "BLS-R03",
@@ -187,12 +197,15 @@ def evaluate_rules(proposal: dict[str, Any]) -> str:
 
     # ---- BLS-R05: Variant compatibility ----
     # If a live-work (onder-sp) VWI is selected, the matched RO must permit it.
-    live_vwis_selected = [v for v in vwi_ids if v in LIVE_WORK_VARIANTS]
+    live_vwis_selected = [v for v in vwi_ids if is_live_work_vwi(v)]
     if live_vwis_selected or requires_live_work:
         if matched_ro:
             ro_permits = matched_ro.get("permits_live_work", False)
             ro_covered = set(matched_ro.get("covered_vwi_ids", []))
-            uncovered_live = [v for v in live_vwis_selected if v not in ro_covered]
+            uncovered_live = [
+                v for v in live_vwis_selected
+                if not any(vwi_matches(v, covered) for covered in ro_covered)
+            ]
             ok = ro_permits and len(uncovered_live) == 0
             verdicts.append({
                 "rule_id": "BLS-R05",

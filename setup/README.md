@@ -1,132 +1,262 @@
-# Workshop Deployment
+# Workshop infrastructure and access
 
-## Quick Start
+The supported production topology is **one isolated environment per team**.
+Each invocation creates a resource group containing a Foundry account and
+project, Azure AI Search, Storage, and Application Insights. Use a unique prefix
+for every team.
+
+`SharedProjects` is available as an explicit cost-optimization mode. It creates
+multiple Foundry projects on one Search and Storage service. Resources are
+namespaced per project, but built-in Search and Storage data roles apply across
+the service. Shared mode is therefore **logical isolation, not a security
+boundary**.
+
+## Prerequisites
+
+Operators need:
+
+- Azure CLI and an active `az login` session in the target tenant.
+- `Owner`, `User Access Administrator`, or equivalent permission to create the
+  required role assignments at the deployed resource scopes.
+- Permission to create resources and model deployments in the target
+  subscription.
+- Confirmed model quota and feature availability in the selected region.
+- Entra object IDs for team security groups or individual principals.
+
+Participants need Python 3.12, Node.js 20 or newer, Azure CLI, and the
+repository dependencies. Local code uses `DefaultAzureCredential` or
+`AzureCliCredential`; both use the participant's Azure CLI session. Search API
+keys are disabled.
 
 ```powershell
-.\setup\deploy.ps1 -Prefix "myteam-lab" -Location "westeurope" -ProjectCount 3
+az login --tenant <tenant-id>
+az account set --subscription <subscription-id>
 ```
 
-| Parameter      | Description                                              | Default          |
-|----------------|----------------------------------------------------------|------------------|
-| `-Prefix`      | Naming prefix for all resources (required)               | —                |
-| `-Location`    | Azure region                                             | `swedencentral`  |
-| `-ProjectCount`| Number of Foundry projects under a single Foundry account| `1`              |
-| `-SubscriptionId`| Target subscription (uses current default if omitted)  | —                |
+## Recommended: isolated team deployment
 
-## What Gets Deployed
+Prepare an access manifest for the team. Copy
+[`access-manifest.example.json`](access-manifest.example.json), replace the
+placeholder object IDs, and keep `projectIndex` set to `1`.
 
-### 1. Resource Group
+```powershell
+.\setup\deploy.ps1 `
+  -Prefix "workshop-team01" `
+  -Location "swedencentral" `
+  -SubscriptionId "<subscription-id>" `
+  -AccessManifestPath ".\setup\access-team01.json"
+```
 
-`{Prefix}-rg` — container for all resources below.
+Repeat with `workshop-team02`, `workshop-team03`, and so on. Each invocation is
+idempotent for the same prefix.
 
-### 2. Azure AI Foundry Account
+## Optional: shared-project deployment
 
-| Property      | Value                                                    |
-|---------------|----------------------------------------------------------|
-| Name          | `{Prefix}-foundry`                                       |
-| Kind          | `AIServices`                                             |
-| SKU           | **S0**                                                   |
-| Identity      | System-assigned managed identity (enabled)               |
-| Custom domain | `{Prefix}-foundry` (required for project creation)       |
+Use shared mode only when all teams are allowed to access the same Search and
+Storage services.
 
-### 3. Foundry Projects
+```powershell
+.\setup\deploy.ps1 `
+  -Prefix "workshop-shared" `
+  -Topology "SharedProjects" `
+  -ProjectCount 10 `
+  -SearchSku "standard2" `
+  -Location "swedencentral" `
+  -AccessManifestPath ".\setup\access-shared.json"
+```
 
-One shared Foundry account with **N** projects underneath:
+Map every manifest entry with either:
 
-- `ProjectCount = 1` → `{Prefix}-project`
-- `ProjectCount = N` → `{Prefix}-project-01` … `{Prefix}-project-{N}`
+- `projectIndex`: one-based index in the generated project list; or
+- `projectName`: exact generated project name.
 
-Each project gets its own system-assigned managed identity, connections, and `.env` file.
+For example, a facilitator who needs all ten projects appears ten times in the
+manifest, once for each project. Use Entra security groups instead of individual
+users when practical.
 
-### 4. Model Deployments (on the Foundry account)
+### Search sizing guardrail
 
-| Deployment Name            | Model                     | Version      | SKU              | Capacity (TPM) |
-|----------------------------|---------------------------|--------------|------------------|----------------|
-| `gpt-5.4-mini`            | gpt-5.4-mini              | 2026-03-17   | GlobalStandard   | 1 000          |
-| `text-embedding-ada-002`  | text-embedding-ada-002    | 2             | GlobalStandard   | 656            |
-| `gpt-4.1-mini`            | gpt-4.1-mini              | 2025-04-14   | GlobalStandard   | 5 000          |
+The deployment reserves an estimate of seven indexes per project: application
+indexes, a hands-on Search index, and three Foundry IQ indexes. It rejects
+topologies that exceed the documented index limit of the selected SKU.
 
-All models are shared across projects (deployed at the account level).
+| Search SKU | Maximum indexes | Maximum projects using the seven-index estimate |
+|---|---:|---:|
+| `basic` | 15 | 2 |
+| `standard` (S1) | 50 | 7 |
+| `standard2` (S2) | 200 | 28 |
 
-### 5. Azure AI Search
+The estimate is a deployment guardrail, not a substitute for load testing.
+Parallel participants also share replicas, partitions, model quota, and
+agent-service limits.
 
-| Property       | Value                                     |
-|----------------|-------------------------------------------|
-| Name           | `{Prefix}-search`                         |
-| SKU            | **Basic**                                 |
-| Replicas       | 1                                         |
-| Partitions     | 1                                         |
-| Identity       | System-assigned managed identity          |
+## Access manifest
 
-### 6. Storage Account
+The manifest uses Microsoft Entra **object IDs**, not application/client IDs or
+user principal names. This avoids a Microsoft Graph dependency during
+deployment.
 
-| Property | Value                                            |
-|----------|--------------------------------------------------|
-| Name     | `{Prefix (alphanumeric only)}blob` (max 24 chars)|
-| SKU      | **Standard_LRS**                                 |
-| Kind     | StorageV2                                        |
+```json
+{
+  "assignments": [
+    {
+      "projectIndex": 1,
+      "principalId": "00000000-0000-0000-0000-000000000001",
+      "principalType": "Group",
+      "displayName": "workshop-team-01"
+    }
+  ]
+}
+```
 
-### 7. Application Insights
+Supported `principalType` values are `Group`, `User`, `ServicePrincipal`, and
+`ForeignGroup`.
 
-| Property | Value                                             |
-|----------|---------------------------------------------------|
-| Name     | `{Prefix (alphanumeric only)}insights`            |
-| Kind     | web                                               |
+Each entry receives:
 
-## RBAC Role Assignments
+| Role | Scope | Purpose |
+|---|---|---|
+| `Reader` | Foundry account | See the account that contains the assigned project |
+| `Foundry User` | Assigned Foundry project | Build, run, and evaluate agents |
+| `Search Service Contributor` | Search service | Create and manage index definitions and knowledge resources |
+| `Search Index Data Contributor` | Search service | Load and query index content |
+| `Search Index Data Reader` | Search service | Query index content |
+| `Storage Blob Data Contributor` | Storage account | Read and write workshop blobs |
+| `Monitoring Reader` | Application Insights | Inspect telemetry configuration and trace views |
+| `Log Analytics Reader` | Connected workspace | Query ingested traces and logs |
 
-### Service-to-Service (managed identities)
+In shared mode, the last four service data roles are not project-scoped. A team
+can technically access another team's Search or Storage resources. Namespacing
+prevents accidental collisions, not malicious or mistaken cross-team access.
 
-| Principal          | Role                            | Scope       | Why                                                        |
-|--------------------|---------------------------------|-------------|------------------------------------------------------------|
-| Foundry MI         | Search Index Data Reader        | AI Search   | Agents can query search indexes                            |
-| Foundry MI         | Search Service Contributor      | AI Search   | Agents can manage indexes (create, update)                 |
-| Search MI          | Cognitive Services OpenAI User  | Foundry     | Search can call Foundry models for vectorization           |
+## Resources
 
-### Deploying User
+For prefix `workshop-team01`, the script creates:
 
-| Principal          | Role                            | Scope       | Why                                                        |
-|--------------------|---------------------------------|-------------|------------------------------------------------------------|
-| Signed-in user     | Cognitive Services User         | Foundry     | Can call Foundry APIs (agents, models, connections)        |
-| Signed-in user     | Search Index Data Reader        | AI Search   | Can query search indexes from local scripts                |
-| Signed-in user     | Storage Blob Data Contributor   | Storage     | Can upload/download blobs (crew data, documents)           |
+| Resource | Name |
+|---|---|
+| Resource group | `workshop-team01-rg` |
+| Foundry account | `workshop-team01-foundry` |
+| Foundry project | `workshop-team01-project` |
+| Azure AI Search | `workshop-team01-search` |
+| Storage account | Alphanumeric prefix plus `blob`; long names retain a deterministic hash |
+| Application Insights | Alphanumeric prefix plus `insights` |
 
-## Per-Project Connections
+The Foundry account and projects use system-assigned managed identities. Project
+connections to Search use Microsoft Entra authentication. Search data-plane API
+keys are disabled.
 
-Each Foundry project gets two connections created via the Management API:
+Model deployments are created only after the deployment verifies that the exact
+model version and deployment type are currently available to the subscription
+in the selected region. The script also verifies that the Cognitive Services
+quota endpoint is available. Use `-SkipQuotaCheck` only after an operator has
+manually verified quota.
 
-| Connection          | Category          | Auth   | Purpose                                     |
-|---------------------|-------------------|--------|---------------------------------------------|
-| `search-connection` | CognitiveSearch   | AAD    | Agents can access AI Search indexes          |
-| `appinsights-connection` | AppInsights  | ApiKey | Tracing and telemetry from agent runs        |
+## Collision-safe environment files
 
-> The AppInsights connection must use `ApiKey` auth (the App Insights connection string as the key). The category rejects `AAD` with HTTP 400.
+Single-project deployment writes `.env`. Shared deployment writes one
+`.env.<project-name>` per project plus `.env` for the first project.
 
-## Generated `.env` Files
+Every file contains a unique `WORKSHOP_RESOURCE_NAMESPACE`. The generated names
+include:
 
-| Scenario           | Files                                                                 |
-|--------------------|-----------------------------------------------------------------------|
-| `ProjectCount = 1` | `.env` at repo root                                                   |
-| `ProjectCount = N` | `.env.{project-name}` per project + `.env` defaulting to first project|
+- `AZURE_SEARCH_INDEX`
+- `AZURE_SEARCH_RO_INDEX`
+- `AZURE_SEARCH_CREW_INDEX`
+- `LAB_SEARCH_INDEX`
+- `FOUNDRY_IQ_KNOWLEDGE_BASE`
+- `FOUNDRY_IQ_PROCEDURES_INDEX`
+- `FOUNDRY_IQ_RAAMOPDRACHTEN_INDEX`
+- `FOUNDRY_IQ_CREW_INDEX`
+- three corresponding `FOUNDRY_IQ_*_SOURCE` names
+- `FOUNDRY_IQ_MCP_CONNECTION_NAME`
+- `AZURE_STORAGE_CREW_CONTAINER`
 
-To switch the active project (multi-project): copy `.env.{project-name}` to `.env`.
+Participant code must use these values and must not create or delete fixed-name
+Search indexes, knowledge sources, knowledge bases, or containers.
 
-## Next Steps After Deployment
+No Search admin key is written to an environment file.
 
-```bash
-# 1. Index the BLS corpus into AI Search AND upload the lookup data
-#    (crew, raamopdrachten, incidents) to Blob Storage
+## Validation gates
+
+After deployment, run the read-only operator validation:
+
+```powershell
+.\setup\Test-WorkshopDeployment.ps1 `
+  -Prefix "workshop-team01" `
+  -Location "swedencentral" `
+  -AccessManifestPath ".\setup\access-team01.json"
+```
+
+For shared mode, pass the same `Topology`, `ProjectCount`, and `SearchSku` values
+used for deployment. Fresh role assignments can take several minutes to
+propagate; rerun the validation before investigating an immediate RBAC failure.
+
+Every participant should then run:
+
+```powershell
+.\setup\Test-WorkshopPrerequisites.ps1 -EnvironmentFile ".env"
+```
+
+The check automatically uses the repository `.venv` when present, even when
+PowerShell itself was launched outside an activated environment. An explicit
+Python 3.12 executable can be supplied with `-PythonPath`.
+
+The participant check verifies:
+
+- required non-secret environment settings;
+- Azure CLI, Python, Python packages, Node.js, and npm;
+- expected tenant and subscription;
+- Entra token acquisition for ARM, Foundry, Search, and Storage;
+- Foundry project visibility;
+- effective Search and Blob Storage data-plane access.
+
+Do not distribute an environment until both gates pass.
+
+## Seed the environment
+
+From the selected project environment:
+
+```powershell
 python app/scripts/setup_search.py --all
-
-# 2. Deploy Foundry agents
 python app/scripts/deploy_agents.py
-
-# 3. Start the backend
-cd app/backend && uvicorn main:app --reload
-
-# 4. Start the frontend
-cd app/frontend && npm run dev
 ```
 
-> `setup_search.py --all` indexes the BLS corpus **and** uploads the structured
-> lookup tables to Blob Storage. Use `--documents` or `--blob` to run just one half.
+For the optional multi-source Foundry IQ lab, also run:
+
+```powershell
+python app/scripts/setup_search.py --foundry-iq
+```
+
+This command creates namespaced semantic indexes for the synthetic
+raamopdrachten and crew tables, then idempotently creates three knowledge
+sources, one knowledge base, and its project-managed-identity MCP connection.
+The reference application continues to use the local structured tables for its
+deterministic authorization gates.
+
+After seeding, run the drift check. It uses GET requests only and does not
+recreate or update Azure resources:
+
+```powershell
+python app/scripts/setup_foundry_iq.py --validate-only
+```
+
+For shared mode, copy the target `.env.<project-name>` to `.env` before seeding
+that project. Validate the generated namespace before running cleanup.
+
+## Authentication model
+
+- Operators authenticate with Azure CLI and require control-plane plus
+  role-assignment permissions.
+- Participants authenticate locally with Azure CLI.
+- Python applications use `DefaultAzureCredential`, whose local developer chain
+  can use that CLI session.
+- Agent-to-Search access uses the Foundry project's managed identity.
+- Search-to-model access uses the Search service's managed identity.
+- Blob access uses Entra identities and `Storage Blob Data Contributor`.
+- Trace review uses `Monitoring Reader` plus `Log Analytics Reader`; the
+  Application Insights connection string is not distributed in `.env`.
+- Search API keys are disabled and never distributed.
+
+This design keeps participant access revocable through Entra groups and ensures
+the preflight exercises the same identity path used by the labs.

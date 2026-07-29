@@ -7,7 +7,7 @@ Each PDF page becomes one search document with fields:
   id, vwi_code, title, excerpt, source_file, page_number, content
 
 Requires:
-  pip install azure-search-documents azure-identity pypdf python-dotenv
+  python -m pip install -r requirements.txt
 
 Usage:
   python scripts/index_documents.py
@@ -32,7 +32,7 @@ from azure.search.documents.indexes.models import (
     SearchableField,
 )
 
-from shared import get_search_clients
+from shared import get_search_clients, require_successful_upload, scoped_name
 
 try:
     from pypdf import PdfReader
@@ -41,7 +41,7 @@ except ImportError:
     sys.exit(1)
 
 DOCS_ROOT = Path(__file__).parent.parent / "docs"
-INDEX_NAME = os.getenv("AZURE_SEARCH_INDEX", "idx_bls_corpus")
+INDEX_NAME = scoped_name("idx_bls_corpus", "AZURE_SEARCH_INDEX")
 BATCH_SIZE = 50
 
 # Capture the base code AND optional variant suffix (onder-sp / sp-loos).
@@ -71,6 +71,15 @@ def _infer_vwi_code(filename: str, text_sample: str) -> str:
     if m:
         return _normalize_vwi_code(m.group(0))
     return ""
+
+
+def _document_title(filename: str, first_page_text: str, vwi_code: str) -> str:
+    first_nonempty = next(
+        (line.strip() for line in first_page_text.splitlines() if line.strip()),
+        Path(filename).stem,
+    )
+    title = f"{vwi_code} — {first_nonempty}" if vwi_code else first_nonempty
+    return title[:120]
 
 
 def _ensure_index(client: SearchIndexClient) -> None:
@@ -116,7 +125,7 @@ def _pdf_to_docs(pdf_path: Path) -> list[dict]:
     # Use first-page text to infer title and VWI code
     first_text = (reader.pages[0].extract_text() or "")[:500] if reader.pages else ""
     vwi_code = _infer_vwi_code(pdf_path.name, first_text)
-    title_line = first_text.split("\n")[0].strip()[:120] if first_text else pdf_path.stem
+    title_line = _document_title(pdf_path.name, first_text, vwi_code)
 
     for page_num, page in enumerate(reader.pages, start=1):
         text = page.extract_text() or ""
@@ -162,12 +171,12 @@ def main() -> None:
             to_upload = batch[:BATCH_SIZE]
             batch = batch[BATCH_SIZE:]
             result = search_client.upload_documents(to_upload)
-            total += len(to_upload)
+            total += require_successful_upload(result, resource_name=INDEX_NAME)
             print(f"    Uploaded {total} documents so far...")
 
     if batch:
-        search_client.upload_documents(batch)
-        total += len(batch)
+        result = search_client.upload_documents(batch)
+        total += require_successful_upload(result, resource_name=INDEX_NAME)
 
     print(f"Done. Indexed {total} pages from {len(pdfs)} PDF(s) into '{INDEX_NAME}'.")
 

@@ -5,16 +5,34 @@ import os
 from functools import lru_cache
 
 from agent_framework.foundry import FoundryAgent, FoundryChatClient
+from agent_framework.observability import enable_instrumentation
 from azure.identity import DefaultAzureCredential
-from dotenv import load_dotenv
 
-load_dotenv()
+from utils.environment import load_workshop_environment
+
+load_workshop_environment()
+
+# Agent Framework emits metadata-only traces by default. Force prompt, response,
+# and tool payload capture off even if a developer has ENABLE_SENSITIVE_DATA set
+# in their shell.
+enable_instrumentation(enable_sensitive_data=False)
 
 
 def _require(name: str) -> str:
     value = os.getenv(name)
     if not value:
         raise RuntimeError(f"Required environment variable '{name}' is not set.")
+    return value
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw = os.getenv(name, str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be an integer") from exc
+    if not minimum <= value <= maximum:
+        raise RuntimeError(f"{name} must be between {minimum} and {maximum}")
     return value
 
 
@@ -42,5 +60,5 @@ def get_foundry_agent(agent_name: str) -> FoundryAgent:
 
 
 MODEL = os.getenv("FOUNDRY_MODEL", "gpt-4o")
-SEARCH_TOP_K: int = int(os.getenv("SEARCH_TOP_K", "6"))
-MAX_REVISIONS: int = int(os.getenv("MAX_REVISIONS", "2"))
+SEARCH_TOP_K = _env_int("SEARCH_TOP_K", 6, minimum=1, maximum=50)
+MAX_REVISIONS = _env_int("MAX_REVISIONS", 2, minimum=0, maximum=5)

@@ -22,34 +22,33 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from azure.core.credentials import AzureKeyCredential
 from azure.identity import DefaultAzureCredential
 from azure.search.documents import SearchClient
 
 from agents.matcher import MATCHER_NAME
 from agents.retriever import RETRIEVER_NAME
 from agents.reviewer import REVIEWER_NAME
-from config import MAX_REVISIONS, MODEL
+from config import MAX_REVISIONS, MODEL, SEARCH_TOP_K
 from models.incident import IncidentPayload
 from models.responses import ChatResponse, StepEvent
 from rules.evaluate_rules import evaluate_rules
 from utils.agent_runner import stream_foundry_agent
+from utils.naming import scoped_name
 from utils.parsing import try_parse_json
+from utils.vwi import is_live_work_vwi, normalize_vwi_code, vwi_matches
 
 
 @lru_cache(maxsize=1)
 def _bls_search_client() -> SearchClient:
     endpoint = os.environ["AZURE_SEARCH_ENDPOINT"]
-    key = os.getenv("AZURE_SEARCH_ADMIN_KEY")
-    cred = AzureKeyCredential(key) if key else DefaultAzureCredential()
     return SearchClient(
         endpoint=endpoint,
-        index_name=os.getenv("AZURE_SEARCH_INDEX", "idx_bls_corpus"),
-        credential=cred,
+        index_name=scoped_name("idx_bls_corpus", "AZURE_SEARCH_INDEX"),
+        credential=DefaultAzureCredential(),
     )
 
 
-def _fallback_retrieve_vwis(query: str, top: int = 8) -> list[dict]:
+def _fallback_retrieve_vwis(query: str, top: int = SEARCH_TOP_K) -> list[dict]:
     """Direct Azure Search fallback when the retriever LLM returns an empty array.
 
     Returns the same shape the LLM was supposed to produce, deduped by vwi_code.
@@ -60,25 +59,25 @@ def _fallback_retrieve_vwis(query: str, top: int = 8) -> list[dict]:
             top=top * 3,
             select=["vwi_code", "title", "content", "source_file"],
         )
+        seen: set[str] = set()
+        out: list[dict] = []
+        for h in hits:
+            code = normalize_vwi_code(h.get("vwi_code") or "")
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            out.append({
+                "vwi_id": code,
+                "title": str(h.get("title") or code)[:240],
+                "content": str(h.get("content") or "")[:2_000],
+                "score": h.get("@search.score"),
+                "source_doc": str(h.get("source_file") or "")[:500],
+            })
+            if len(out) >= top:
+                break
+        return out
     except Exception:
         return []
-    seen: set[str] = set()
-    out: list[dict] = []
-    for h in hits:
-        code = h.get("vwi_code")
-        if not code or code in seen:
-            continue
-        seen.add(code)
-        out.append({
-            "vwi_id": code,
-            "title": h.get("title") or code,
-            "content": h.get("content") or "",
-            "score": h.get("@search.score"),
-            "source_doc": h.get("source_file"),
-        })
-        if len(out) >= top:
-            break
-    return out
 
 
 # ---- Deterministic data lookups (synthetic data, small & local) ----
@@ -136,19 +135,6 @@ def _filter_raamopdrachten(
     return out
 
 
-def _vwi_matches(selected: str, covered: str) -> bool:
-    """Exact match, or selected is a bare base code (E-22) that prefix-matches
-    a fully-qualified covered code (E-22-onder-sp, E-22-sp-loos).
-    Defensive: covers cases where the indexer or matcher dropped the suffix.
-    """
-    if selected == covered:
-        return True
-    # Bare base like "E-22" matches "E-22-*"
-    if "-" in selected and selected.count("-") == 1 and covered.startswith(selected + "-"):
-        return True
-    return False
-
-
 def _overlap_vwi_set(selected_ids: list[str], covered_ids: list[str]) -> set[str]:
     """Return the set of *selected* IDs that have a matching covered ID (using
     exact or base-code prefix match). Returns selected-IDs so coverage math
@@ -157,7 +143,7 @@ def _overlap_vwi_set(selected_ids: list[str], covered_ids: list[str]) -> set[str
     out: set[str] = set()
     for s in selected_ids:
         for c in covered_ids:
-            if _vwi_matches(s, c):
+            if vwi_matches(s, c):
                 out.add(s)
                 break
     return out
@@ -196,10 +182,17 @@ def _coverage_status(selected_vwi_ids: list[str], covered_overlap: set[str]) -> 
     return "partial"
 
 
-def _crew_for_ro(ra_id: str | None) -> str | None:
+def _crew_for_ro(
+    ra_id: str | None,
+    available_crew: list[str] | None = None,
+) -> str | None:
     if not ra_id:
         return None
-    for c in _load_crew():
+    crew = _load_crew()
+    if available_crew:
+        by_id = {c.get("crew_id"): c for c in crew}
+        crew = [by_id[cid] for cid in available_crew if cid in by_id]
+    for c in crew:
         if ra_id in c.get("raamopdracht_ids", []):
             return c.get("crew_id")
     return None
@@ -208,10 +201,15 @@ def _crew_for_ro(ra_id: str | None) -> str | None:
 def _apply_deterministic_match(
     matcher_proposal: dict,
     filtered_ros: list[dict],
+    available_crew: list[str] | None = None,
 ) -> dict:
     """Overwrite RO/crew/coverage with Python-derived values; keep VWIs + rationale."""
     vwis = matcher_proposal.get("vwis", []) if isinstance(matcher_proposal, dict) else []
-    vwi_ids = [v.get("vwi_id", "") for v in vwis if v.get("vwi_id")]
+    vwi_ids = [
+        v.get("vwi_id", "")
+        for v in vwis
+        if isinstance(v, dict) and v.get("vwi_id")
+    ]
     best_ro, overlap = _pick_best_ro(filtered_ros, vwi_ids)
 
     if best_ro is None:
@@ -221,9 +219,93 @@ def _apply_deterministic_match(
     else:
         ra_id = best_ro.get("raamopdracht_id")
         matcher_proposal["matched_raamopdracht_id"] = ra_id
-        matcher_proposal["matched_crew"] = _crew_for_ro(ra_id)
+        matcher_proposal["matched_crew"] = _crew_for_ro(ra_id, available_crew)
         matcher_proposal["coverage_status"] = _coverage_status(vwi_ids, overlap)
     return matcher_proposal
+
+
+def _normalize_matcher_output(parsed: Any) -> dict[str, Any]:
+    """Keep only the documented matcher schema and fail closed on bad fields."""
+    source = parsed if isinstance(parsed, dict) else {}
+    parse_error = not isinstance(parsed, dict)
+    vwis_raw = source.get("vwis", [])
+    if not isinstance(vwis_raw, list):
+        vwis_raw = []
+        parse_error = True
+
+    vwis: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in vwis_raw:
+        if not isinstance(item, dict):
+            parse_error = True
+            continue
+        code = normalize_vwi_code(str(item.get("vwi_id", "")))
+        if not code or code in seen:
+            parse_error = True
+            continue
+        confidence = item.get("confidence")
+        if confidence not in {"confirmed", "candidate"}:
+            confidence = "candidate"
+            parse_error = True
+        seen.add(code)
+        vwis.append({"vwi_id": code, "confidence": confidence})
+
+    citations_raw = source.get("citations", {})
+    if not isinstance(citations_raw, dict):
+        citations_raw = {}
+        parse_error = True
+    citations: dict[str, list[str]] = {}
+    for key in ("vwi_refs", "raamopdracht_scope_excerpts", "bei_rule_refs"):
+        values = citations_raw.get(key, [])
+        if not isinstance(values, list):
+            values = []
+            parse_error = True
+        citations[key] = [str(value)[:1_000] for value in values if isinstance(value, str)]
+
+    result: dict[str, Any] = {
+        "vwis": vwis,
+        "rationale": str(source.get("rationale") or "")[:4_000],
+        "citations": citations,
+    }
+    if parse_error:
+        result["output_parse_error"] = True
+    return result
+
+
+def _normalize_reviewer_output(parsed: Any) -> dict[str, Any]:
+    source = parsed if isinstance(parsed, dict) else {}
+    status = source.get("review_status")
+    findings_raw = source.get("findings", [])
+    findings: list[dict[str, str]] = []
+    if isinstance(findings_raw, list):
+        for item in findings_raw:
+            if not isinstance(item, dict):
+                continue
+            verdict = item.get("verdict")
+            if verdict not in {"pass", "fail"}:
+                verdict = "fail"
+            findings.append({
+                "criterion": str(item.get("criterion") or "structured_output")[:120],
+                "verdict": verdict,
+                "reason": str(item.get("reason") or "Missing reviewer reason.")[:2_000],
+            })
+
+    valid_status = status in {"pass", "revise", "flagged_for_human_review"}
+    feedback = source.get("feedback_for_matcher")
+    if feedback is not None and not isinstance(feedback, str):
+        feedback = None
+    if not valid_status or not findings or (status == "revise" and not feedback):
+        status = "flagged_for_human_review"
+        findings.append({
+            "criterion": "structured_output",
+            "verdict": "fail",
+            "reason": "Reviewer returned incomplete or invalid structured output.",
+        })
+    return {
+        "review_status": status,
+        "findings": findings,
+        "feedback_for_matcher": feedback,
+    }
 
 
 # ---- Input formatters ----
@@ -367,7 +449,13 @@ async def run_dispatch_stream(
 
     vwi_candidates: list = []
     if isinstance(retriever_data, dict):
-        vwi_candidates = retriever_data.get("vwi_candidates", [])
+        candidates = retriever_data.get("vwi_candidates", [])
+        if isinstance(candidates, list):
+            vwi_candidates = [
+                candidate for candidate in candidates
+                if isinstance(candidate, dict)
+                and normalize_vwi_code(str(candidate.get("vwi_id", "")))
+            ][:SEARCH_TOP_K]
 
     # Fallback: gpt-5.4-mini sometimes returns an empty array even when search
     # has hits. Do a direct Azure Search call so the matcher always has VWIs.
@@ -383,9 +471,7 @@ async def run_dispatch_stream(
                 ),
             )
 
-    vwi_ids_found = [
-        v.get("vwi_id", "?") for v in vwi_candidates
-    ]
+    vwi_ids_found = [str(v.get("vwi_id", "?")) for v in vwi_candidates]
     yield StepEvent(
         type="step_complete",
         agent="procedure_retriever",
@@ -439,15 +525,19 @@ async def run_dispatch_stream(
                 type="token", agent="dispatch_matcher",
                 summary=tok,
             )
-        matcher_proposal = (
-            try_parse_json(matcher_text) or {"raw": matcher_text}
+        matcher_proposal = _normalize_matcher_output(
+            try_parse_json(matcher_text)
         )
 
         # Deterministic post-step: overwrite matched_raamopdracht_id, matched_crew,
         # coverage_status with values derived from VWI overlap. The LLM never picks
         # the RO, so revisions cannot regress these structured fields.
         if isinstance(matcher_proposal, dict):
-            matcher_proposal = _apply_deterministic_match(matcher_proposal, filtered_ros)
+            matcher_proposal = _apply_deterministic_match(
+                matcher_proposal,
+                filtered_ros,
+                payload.anchors.available_crew,
+            )
 
         matched_ro = matcher_proposal.get("matched_raamopdracht_id") or "none"
         coverage = matcher_proposal.get("coverage_status", "unknown")
@@ -464,7 +554,7 @@ async def run_dispatch_stream(
             if isinstance(matcher_proposal, dict) else []
         )
         vwi_ids = [v.get("vwi_id", "") for v in vwis_from_proposal]
-        requires_live = any("onder-sp" in v for v in vwi_ids)
+        requires_live = any(is_live_work_vwi(v) for v in vwi_ids)
 
         rule_input = (
             dict(matcher_proposal) if isinstance(matcher_proposal, dict) else {}
@@ -500,13 +590,10 @@ async def run_dispatch_stream(
                 type="token", agent="dispatch_reviewer",
                 summary=tok,
             )
-        reviewer_verdict = try_parse_json(reviewer_text) or {
-            "review_status": "flagged_for_human_review",
-            "findings": [],
-            "feedback_for_matcher": None,
-        }
-
-        review_status = reviewer_verdict.get("review_status", "pass")
+        reviewer_verdict = _normalize_reviewer_output(
+            try_parse_json(reviewer_text)
+        )
+        review_status = reviewer_verdict["review_status"]
         yield StepEvent(
             type="step_complete",
             agent="dispatch_reviewer",
@@ -532,7 +619,9 @@ async def run_dispatch_stream(
         dict(matcher_proposal) if isinstance(matcher_proposal, dict) else {}
     )
     final["incident_id"] = payload.incident_id
-    final["review_status"] = reviewer_verdict.get("review_status", "pass")
+    final["review_status"] = reviewer_verdict.get(
+        "review_status", "flagged_for_human_review"
+    )
     final["review_findings"] = reviewer_verdict.get("findings", [])
     final["rule_verdicts"] = rule_findings
     final["revision_count"] = revision
@@ -544,10 +633,37 @@ async def run_dispatch_stream(
         or any_hard_fail
         or coverage_final != "covered"
         or not final.get("matched_raamopdracht_id")
+        or not final.get("matched_crew")
+        or not final.get("vwis")
+        or final.get("output_parse_error")
     ):
         final["operational_action"] = "wv_escalation_needed"
     else:
         final["operational_action"] = "dispatch_ok"
+
+    if (
+        final["operational_action"] == "wv_escalation_needed"
+        and not final.get("wv_escalation_reason")
+    ):
+        failed_rules = [
+            str(rule.get("rule_id"))
+            for rule in rule_findings
+            if not rule.get("pass", False)
+        ]
+        reasons: list[str] = []
+        if failed_rules:
+            reasons.append(f"Failed deterministic rules: {', '.join(failed_rules)}")
+        if not final.get("vwis"):
+            reasons.append("No usable VWI selection")
+        if not final.get("matched_raamopdracht_id"):
+            reasons.append("No matching raamopdracht")
+        if not final.get("matched_crew"):
+            reasons.append("No available crew mapped to the raamopdracht")
+        if final["review_status"] == "flagged_for_human_review":
+            reasons.append("Reviewer requested human review")
+        if final.get("output_parse_error"):
+            reasons.append("Agent output failed structured validation")
+        final["wv_escalation_reason"] = "; ".join(reasons)
 
     vwi_ids_out = [v.get("vwi_id", "") for v in final.get("vwis", [])]
 

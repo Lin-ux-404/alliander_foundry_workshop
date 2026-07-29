@@ -3,6 +3,12 @@
 *Azure AI Search + FastAPI/SSE + Next.js. Use case: Lisa (KCC dispatcher) gets a*
 *free-text incident, system proposes RO+crew+coverage with rule + judge gates.*
 
+> **Historical engineering log.** It explains previously observed defects, but
+> embedded SDK versions, role names, agent versions and preview API commands are
+> not the current setup contract. Use `setup/README.md`,
+> `docs/RESEARCH_BASELINE.md` and `requirements.txt` for current instructions.
+> Reproduce a symptom before applying an older workaround.
+
 ---
 
 ## Part 1 — Failure modes (in deploy order)

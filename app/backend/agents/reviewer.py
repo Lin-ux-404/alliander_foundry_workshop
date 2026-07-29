@@ -1,9 +1,9 @@
 """Agent definition: dispatch_reviewer — LLM-as-judge that challenges the matcher."""
 from __future__ import annotations
 
-import os
+from utils.naming import scoped_name
 
-REVIEWER_NAME = os.getenv("DRAAD_REVIEWER_AGENT", "draad-dispatch-reviewer")
+REVIEWER_NAME = scoped_name("draad-dispatch-reviewer", "DRAAD_REVIEWER_AGENT")
 
 REVIEWER_PROMPT = """
 You are the dispatch_reviewer agent in an electrical-grid dispatch assistant for

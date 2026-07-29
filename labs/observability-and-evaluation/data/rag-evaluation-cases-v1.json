@@ -1,0 +1,93 @@
+{
+  "schema_version": "1.0",
+  "dataset_id": "synthetic-grid-rag-e2e-v1",
+  "description": "Versioned synthetic benchmark for live Search and Foundry IQ retrieval.",
+  "cases": [
+    {
+      "case_id": "SEARCH-E85",
+      "target": "azure_ai_search",
+      "query": "What are the main safety requirements for replacing low-voltage fuses under procedure E-85?",
+      "ground_truth": "E-85 requires a valid assignment, risk checks and LMRA, protection from exposed live parts, qualified personnel, the prescribed PPE and tools, controlled fuse replacement steps, and a safe handover.",
+      "expected_evidence_groups": [
+        {
+          "name": "procedure",
+          "any_of": ["E-85"]
+        }
+      ]
+    },
+    {
+      "case_id": "SEARCH-E22-LIVE",
+      "target": "azure_ai_search",
+      "query": "Which procedure and safety controls apply when an LS group is removed and replaced on an energized LS rack?",
+      "ground_truth": "E-22-onder-sp is the procedure for removing or installing an LS group on an energized LS rack; the work requires the controls, competence, PPE, LMRA and execution steps stated in that instruction.",
+      "expected_evidence_groups": [
+        {
+          "name": "procedure",
+          "any_of": ["E-22-onder-sp"]
+        }
+      ]
+    },
+    {
+      "case_id": "SEARCH-E48",
+      "target": "azure_ai_search",
+      "query": "What does procedure E-48 require when supervising third-party civil work near low-voltage cables?",
+      "ground_truth": "E-48 governs supervision of civil work in the ground near low-voltage infrastructure and requires the preparation, risk controls, supervision and completion steps stated in that instruction.",
+      "expected_evidence_groups": [
+        {
+          "name": "procedure",
+          "any_of": ["E-48"]
+        }
+      ]
+    },
+    {
+      "case_id": "IQ-E85-1704",
+      "target": "foundry_iq",
+      "query": "Treat the incident ID, requested work, date, and location in this question as given scenario inputs; evaluate them against the knowledge sources and do not report those input facts as missing evidence. For synthetic incident SIM-RAG-01 on 2026-05-21 in postcode 1704 requiring E-85, report: (1) the exact procedure and separate concise claims for its staffing/assignment conditions and its execution/safety controls; (2) RA-NHN-0101's recorded procedure scope, full postcode scope, validity interval, and whether those cover this procedure, location, and date; and (3) separate claims for crew-001-K-de-Vries's authorization link and recorded availability. Cite every factual claim.",
+      "ground_truth": "E-85 is the applicable procedure. It requires an assignment from WVLS-distribution through at least an RO, execution by two people with the stated AVP or AVPLS competence and qualified assistance, risk and last-minute risk checks, PPE and shielding of nearby live parts, load measurement and reduction below 250A when necessary, the prescribed bridging-box and fuse-replacement sequence, and safe handover. RA-NHN-0101 covers procedures E-22-sp-loos, E-67, and E-85 and postcodes 1700 through 1709 from 2026-01-01 through 2026-12-31, so it covers E-85, postcode 1704, and 2026-05-21. crew-001-K-de-Vries is linked to RA-NHN-0101 and has synthetic shift status available.",
+      "source_filters": {
+        "procedure": "vwi_code eq 'E-85'",
+        "authorization": "raamopdracht_id eq 'RA-NHN-0101'",
+        "crew": "crew_id eq 'crew-001-K-de-Vries'"
+      },
+      "expected_evidence_groups": [
+        {
+          "name": "procedure",
+          "any_of": ["E-85"]
+        },
+        {
+          "name": "authorization",
+          "any_of": ["RA-NHN-0101"]
+        },
+        {
+          "name": "crew",
+          "any_of": ["crew-001-K-de-Vries"]
+        }
+      ]
+    },
+    {
+      "case_id": "IQ-E22-1815",
+      "target": "foundry_iq",
+      "query": "Treat the work ID, energized-rack condition, date, and location in this question as given scenario inputs; evaluate them against the knowledge sources and do not report those input facts as missing evidence. For synthetic planned work SIM-RAG-02 on 2026-05-21 in postcode 1815 involving an LS group on an energized LS rack, report: the applicable E-22 procedure variant, whether RA-NHN-0102 permits the work in that location and date, and whether crew-002-M-Janssen is recorded as available and linked to that authorization. Cite every factual claim.",
+      "ground_truth": "E-22-onder-sp is the applicable energized-rack procedure. RA-NHN-0102 covers E-22-onder-sp and postcode 1815 from 2026-01-01 through 2026-12-31 and permits live work. crew-002-M-Janssen is linked to RA-NHN-0102 and has synthetic shift status available.",
+      "source_filters": {
+        "procedure": "vwi_code eq 'E-22-onder-sp'",
+        "authorization": "raamopdracht_id eq 'RA-NHN-0102'",
+        "crew": "crew_id eq 'crew-002-M-Janssen'"
+      },
+      "expected_evidence_groups": [
+        {
+          "name": "procedure",
+          "any_of": ["E-22-onder-sp"]
+        },
+        {
+          "name": "authorization",
+          "any_of": ["RA-NHN-0102"]
+        },
+        {
+          "name": "crew",
+          "any_of": ["crew-002-M-Janssen"]
+        }
+      ]
+    }
+  ]
+}

@@ -1,80 +1,130 @@
-# DRAAD – Dispatch & Routing AI Assistant for Alliander
+# DRAAD reference application
 
-Multi-agent dispatch assistant for Alliander's electrical grid, built on Azure AI Foundry.
+DRAAD is a synthetic grid-operations assistant built with Microsoft Foundry,
+Agent Framework, Azure AI Search, FastAPI and Next.js.
+
+It demonstrates a grounded agent pipeline with deterministic safety gates. It is
+training software, not an operational dispatch or electrical-work authorization
+system.
 
 ## Architecture
 
-```
-frontend/  → Next.js UI (chat interface)
-backend/   → FastAPI server (pipeline orchestration + rule engine)
-scripts/   → One-time setup scripts (indexing, agent deployment)
-data/      → Synthetic crew & raamopdrachten JSON
-docs/      → BEI-BLS procedure PDFs (VWI work instructions)
+```text
+frontend/  Next.js interface and pipeline visualization
+backend/   FastAPI, agents, deterministic rules and streaming orchestration
+scripts/   Search indexing, Blob upload and prompt-agent deployment
+data/      Synthetic incident, crew and raamopdracht fixtures
+docs/      Synthetic workshop copies of procedure PDFs
 ```
 
-**Agent pipeline** (see `backend/pipeline.py`):
+Pipeline:
 
-1. `procedure_retriever` – searches VWI corpus for candidate work instructions
-2. `dispatch_matcher` – proposes crew/RO match with coverage analysis
-3. `rule_checker` – deterministic BEI-BLS rule validation (no LLM)
-4. `dispatch_reviewer` – LLM-as-judge that challenges the proposal
+1. `procedure_retriever` searches the VWI corpus.
+2. `dispatch_matcher` selects applicable VWIs and confidence.
+3. Python selects the matching raamopdracht and crew.
+4. `rule_checker` applies five deterministic checks.
+5. `dispatch_reviewer` challenges the structured proposal.
+6. Python computes the final operational action.
+
+See [the architecture context](../docs/CONTEXT.md) for the responsibility split.
 
 ## Prerequisites
 
-- Python 3.11+
-- Node.js 18+
-- An Azure AI Foundry project with a deployed model (e.g. `gpt-4o`)
-- An Azure AI Search resource connected to the Foundry project
+- Python 3.12
+- Node.js 20 or later
+- Azure CLI authenticated to the assigned tenant
+- A Microsoft Foundry project with the required model deployment
+- Azure AI Search connected to the project
+- `Foundry User` on the assigned project
+- Search data-plane roles required by the selected setup path
 
-## Setup
+Run the repository participant preflight before starting.
 
-### 1. Configure environment
+## Configure
 
-```bash
-cp backend/.env.example backend/.env
-# Fill in FOUNDRY_PROJECT_ENDPOINT, FOUNDRY_MODEL,
-# AZURE_SEARCH_ENDPOINT, and AZURE_SEARCH_CONNECTION_NAME
-```
-
-### 2. Install dependencies
+From the repository root:
 
 ```bash
-# Backend
-cd backend
-pip install -r requirements.txt
-
-# Frontend
-cd frontend
-npm install
+cp .env.example .env
 ```
 
-### 3. Index all data into AI Search
+Set the project, Search and storage endpoints. Use the namespace assigned to your
+team:
+
+```dotenv
+WORKSHOP_RESOURCE_NAMESPACE=team-01
+```
+
+Explicit resource-name variables override derived names. Never reuse another
+team's namespace.
+
+## Install
 
 ```bash
-python scripts/index_documents.py      # idx_bls_corpus
-python scripts/index_raamopdrachten.py  # idx_raamopdrachten
-python scripts/index_crew.py            # idx_crew
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+
+cd app/frontend
+npm ci
+cd ../..
 ```
 
-### 4. Set `AZURE_SEARCH_CONNECTION_NAME` in `backend/.env`
+## Prepare Search and agents
 
-Create the AI Search connection in the Foundry portal first, then set the
-connection name in your `.env`.
-
-### 5. Deploy agents to Foundry
+The infrastructure deployment normally generates the environment file and
+connections. From the repository root:
 
 ```bash
-python scripts/deploy_agents.py
+python app/scripts/setup_search.py --documents
+python app/scripts/deploy_agents.py
 ```
 
-### 6. Run the app
+To copy the synthetic lookup fixtures to Blob Storage as an ingestion exercise:
 
 ```bash
-# Terminal 1 – backend
-cd backend && uvicorn main:app --reload --port 8000
-
-# Terminal 2 – frontend
-cd frontend && npm run dev
+python app/scripts/setup_search.py --blob
 ```
 
-Open http://localhost:3000 to use the app.
+The backend intentionally reads the versioned local JSON fixtures for
+deterministic demonstrations.
+
+## Run
+
+Backend:
+
+```bash
+cd app/backend
+python -m uvicorn main:app --reload --port 8000
+```
+
+Frontend, in a second terminal:
+
+```bash
+cd app/frontend
+npm run dev
+```
+
+Open `http://localhost:3000`.
+
+## Validate
+
+From the repository root:
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall -q app
+cd app/frontend && npm run build
+```
+
+Cloud-dependent validation must still exercise one Search query, one deployed
+agent and one complete dispatch in the assigned tenant.
+
+## Safety and cleanup
+
+- Use only the synthetic data included in the repository.
+- Do not place credentials, access tokens or personal data in prompts or traces.
+- Preserve exact VWI work-mode suffixes; ambiguous base codes fail closed.
+- Delete only resources that contain your `WORKSHOP_RESOURCE_NAMESPACE`.
+- Treat every dispatch result as a teaching artifact requiring human review.

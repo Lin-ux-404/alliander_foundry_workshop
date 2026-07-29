@@ -1,8 +1,9 @@
 """
 upload_crew_data.py
-Uploads synth crew DB JSON, raamopdrachten JSON, and incidents JSON to Azure Blob Storage.
+Uploads the synthetic crew, raamopdracht, and incident fixtures to Azure Blob
+Storage.
 
-Usage (once synth data arrives from colleague):
+Usage:
   python scripts/upload_crew_data.py --crew data/crew.json --ro data/raamopdrachten.json --incidents data/incidents.json
 
 Expects:
@@ -13,15 +14,23 @@ Expects:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
+from azure.core.exceptions import ResourceExistsError
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient
 from dotenv import load_dotenv
-import os
+
+from shared import scoped_name
 
 load_dotenv(Path(__file__).parent.parent.parent / ".env")
+APP_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _scoped_container_name() -> str:
+    return scoped_name("crew-data", "AZURE_STORAGE_CREW_CONTAINER")
 
 
 def upload(account_url: str, container: str, local_path: Path, blob_name: str) -> None:
@@ -33,9 +42,8 @@ def upload(account_url: str, container: str, local_path: Path, blob_name: str) -
     try:
         container_client.create_container()
         print(f"Created container '{container}'.")
-    except Exception as exc:
-        if "ContainerAlreadyExists" not in str(exc):
-            print(f"WARNING: could not create container '{container}': {exc}")
+    except ResourceExistsError:
+        pass
 
     with open(local_path, "rb") as f:
         container_client.upload_blob(name=blob_name, data=f, overwrite=True)
@@ -43,16 +51,16 @@ def upload(account_url: str, container: str, local_path: Path, blob_name: str) -
 
 
 def run(
-    crew: str = "data/crew.json",
-    ro: str = "data/raamopdrachten.json",
-    incidents: str = "data/incidents.json",
+    crew: str | Path = APP_ROOT / "data" / "crew.json",
+    ro: str | Path = APP_ROOT / "data" / "raamopdrachten.json",
+    incidents: str | Path = APP_ROOT / "data" / "incidents.json",
 ) -> None:
     account_url = os.environ.get("AZURE_STORAGE_ACCOUNT_URL")
     if not account_url:
         print("ERROR: AZURE_STORAGE_ACCOUNT_URL is not set.")
         sys.exit(1)
 
-    container = os.getenv("AZURE_STORAGE_CREW_CONTAINER", "crew-data")
+    container = _scoped_container_name()
 
     crew_path = Path(crew)
     ro_path = Path(ro)
@@ -72,9 +80,9 @@ def run(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Upload synth crew data to Blob Storage")
-    parser.add_argument("--crew", default="data/crew.json", help="Path to crew.json")
-    parser.add_argument("--ro", default="data/raamopdrachten.json", help="Path to raamopdrachten.json")
-    parser.add_argument("--incidents", default="data/incidents.json", help="Path to incidents.json")
+    parser.add_argument("--crew", default=APP_ROOT / "data" / "crew.json", help="Path to crew.json")
+    parser.add_argument("--ro", default=APP_ROOT / "data" / "raamopdrachten.json", help="Path to raamopdrachten.json")
+    parser.add_argument("--incidents", default=APP_ROOT / "data" / "incidents.json", help="Path to incidents.json")
     args = parser.parse_args()
 
     run(crew=args.crew, ro=args.ro, incidents=args.incidents)

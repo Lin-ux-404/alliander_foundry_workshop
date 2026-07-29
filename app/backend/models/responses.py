@@ -3,18 +3,18 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(max_length=16_000)
 
 
 class ChatResponse(BaseModel):
     type: str
     response: Any
     model: str
-    sources: list[str] = []
+    sources: list[str] = Field(default_factory=list)
 
 
 class StepEvent(BaseModel):

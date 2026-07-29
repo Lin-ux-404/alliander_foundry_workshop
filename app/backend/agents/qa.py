@@ -1,11 +1,11 @@
 """Agent definition: qa_assistant — answers questions about BEI-BLS procedures."""
 from __future__ import annotations
 
-import os
+from utils.naming import scoped_name
 
-QA_NAME = os.getenv("DRAAD_QA_AGENT", "draad-qa-assistant")
+QA_NAME = scoped_name("draad-qa-assistant", "DRAAD_QA_AGENT")
 
-QA_INDEXES = [os.getenv("AZURE_SEARCH_INDEX", "idx_bls_corpus")]
+QA_INDEXES = [scoped_name("idx_bls_corpus", "AZURE_SEARCH_INDEX")]
 
 QA_PROMPT = """
 You are a helpful assistant for the DRAAD system at Liander.

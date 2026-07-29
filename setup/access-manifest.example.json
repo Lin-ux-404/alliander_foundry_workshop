@@ -1,0 +1,16 @@
+{
+  "assignments": [
+    {
+      "projectIndex": 1,
+      "principalId": "00000000-0000-0000-0000-000000000001",
+      "principalType": "Group",
+      "displayName": "workshop-team-01"
+    },
+    {
+      "projectIndex": 1,
+      "principalId": "00000000-0000-0000-0000-000000000002",
+      "principalType": "User",
+      "displayName": "facilitator"
+    }
+  ]
+}

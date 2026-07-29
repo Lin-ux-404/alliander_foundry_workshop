@@ -29,9 +29,9 @@ from azure.search.documents.indexes.models import (
     SearchableField,
 )
 
-from shared import get_search_clients
+from shared import get_search_clients, require_successful_upload, scoped_name
 
-INDEX_NAME = os.getenv("AZURE_SEARCH_RO_INDEX", "idx_raamopdrachten")
+INDEX_NAME = scoped_name("idx_raamopdrachten", "AZURE_SEARCH_RO_INDEX")
 
 DATA_FILE = Path(__file__).parent.parent / "data" / "raamopdrachten.json"
 
@@ -40,6 +40,12 @@ def _ensure_index(client: SearchIndexClient) -> None:
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
         SimpleField(name="raamopdracht_id", type=SearchFieldDataType.String, filterable=True),
+        SearchableField(
+            name="lookup_text",
+            type=SearchFieldDataType.String,
+            analyzer_name="keyword",
+        ),
+        SearchableField(name="search_summary", type=SearchFieldDataType.String),
         SearchableField(name="bestemd_voor", type=SearchFieldDataType.String),
         SearchField(
             name="covered_vwi_ids",
@@ -64,11 +70,13 @@ def _ensure_index(client: SearchIndexClient) -> None:
         name="default",
         prioritized_fields=SemanticPrioritizedFields(
             content_fields=[
+                SemanticField(field_name="search_summary"),
                 SemanticField(field_name="omschrijving_bedieningshandelingen"),
                 SemanticField(field_name="omschrijving_werkzaamheden"),
             ],
             title_field=SemanticField(field_name="bestemd_voor"),
             keywords_fields=[
+                SemanticField(field_name="lookup_text"),
                 SemanticField(field_name="geldigheidsgebied_prose"),
             ],
         ),
@@ -102,6 +110,23 @@ def main() -> None:
             {
                 "id": ro["raamopdracht_id"],
                 "raamopdracht_id": ro["raamopdracht_id"],
+                "lookup_text": " ".join(
+                    [
+                        ro["raamopdracht_id"],
+                        *ro.get("covered_vwi_ids", []),
+                        *ro.get("geldigheidsgebied_postcodes", []),
+                    ]
+                ),
+                "search_summary": (
+                    f"Authorization {ro['raamopdracht_id']} for "
+                    f"{ro.get('bestemd_voor', '')}. It covers procedures "
+                    f"{', '.join(ro.get('covered_vwi_ids', []))} and postcodes "
+                    f"{', '.join(ro.get('geldigheidsgebied_postcodes', []))}. "
+                    f"It is valid from {ro.get('geldigheidsduur_start', '')} "
+                    f"through {ro.get('geldigheidsduur_end', '')}. "
+                    f"Live work permitted: "
+                    f"{'yes' if ro.get('permits_live_work', False) else 'no'}."
+                ),
                 "bestemd_voor": ro.get("bestemd_voor", ""),
                 "covered_vwi_ids": ro.get("covered_vwi_ids", []),
                 "geldigheidsgebied_postcodes": ro.get("geldigheidsgebied_postcodes", []),
@@ -116,7 +141,7 @@ def main() -> None:
         )
 
     result = search_client.upload_documents(docs)
-    succeeded = sum(1 for r in result if r.succeeded)
+    succeeded = require_successful_upload(result, resource_name=INDEX_NAME)
     print(f"Done. Indexed {succeeded}/{len(docs)} raamopdrachten into '{INDEX_NAME}'.")
 
 

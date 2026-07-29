@@ -8,9 +8,9 @@ VWIs apply, assigning confidence (confirmed vs candidate), and writing rationale
 """
 from __future__ import annotations
 
-import os
+from utils.naming import scoped_name
 
-MATCHER_NAME = os.getenv("DRAAD_MATCHER_AGENT", "draad-dispatch-matcher")
+MATCHER_NAME = scoped_name("draad-dispatch-matcher", "DRAAD_MATCHER_AGENT")
 
 # No search index — all data (VWIs, ROs) is provided in the prompt.
 MATCHER_INDEXES: list[str] = []

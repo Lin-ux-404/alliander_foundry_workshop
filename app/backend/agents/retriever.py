@@ -1,11 +1,11 @@
 """Agent definition: procedure_retriever — surfaces VWI candidates from BLS corpus."""
 from __future__ import annotations
 
-import os
+from utils.naming import scoped_name
 
-RETRIEVER_NAME = os.getenv("DRAAD_RETRIEVER_AGENT", "draad-procedure-retriever")
+RETRIEVER_NAME = scoped_name("draad-procedure-retriever", "DRAAD_RETRIEVER_AGENT")
 
-RETRIEVER_INDEXES = [os.getenv("AZURE_SEARCH_INDEX", "idx_bls_corpus")]
+RETRIEVER_INDEXES = [scoped_name("idx_bls_corpus", "AZURE_SEARCH_INDEX")]
 
 RETRIEVER_PROMPT = """
 You are the procedure_retriever agent in an electrical-grid dispatch assistant for

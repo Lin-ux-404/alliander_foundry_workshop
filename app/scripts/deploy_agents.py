@@ -4,10 +4,10 @@ Registers the DRAAD agents as Prompt Agents in Foundry Agent Service
 with Azure AI Search tools attached.
 
 Agent definitions (prompts, names, indexes) are imported from
-backend/agents/ — single source of truth for both deployment and runtime.
+backend/agents/ so deployment and runtime use the same configuration.
 
 Requires:
-  pip install azure-ai-projects>=2.0.0 azure-identity python-dotenv
+  python -m pip install -r requirements.txt
 
 Usage:
   python scripts/deploy_agents.py
@@ -30,7 +30,7 @@ from azure.ai.projects.models import (
     AzureAISearchQueryType,
 )
 
-import shared  # loads backend/.env via shared.py
+import shared  # loads the repository-root .env via shared.py
 
 # Add backend to sys.path so we can import agent definitions
 sys.path.insert(0, str(Path(__file__).parent.parent / "backend"))
@@ -40,6 +40,9 @@ from agents import get_all_agent_configs
 PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
 MODEL = os.getenv("FOUNDRY_MODEL", "gpt-4o")
 SEARCH_CONNECTION_NAME = os.environ["AZURE_SEARCH_CONNECTION_NAME"]
+SEARCH_TOP_K = int(os.getenv("SEARCH_TOP_K", "6"))
+if not 1 <= SEARCH_TOP_K <= 50:
+    raise RuntimeError("SEARCH_TOP_K must be between 1 and 50")
 
 # Failure mode #20: on a freshly (re)provisioned project, the Foundry Agent
 # Service data plane is eventually consistent. The write path (create_version)
@@ -85,6 +88,7 @@ def _search_tools(connection_id: str, index_names: list[str]) -> list:
                         project_connection_id=connection_id,
                         index_name=index_names[0],
                         query_type=AzureAISearchQueryType.SEMANTIC,
+                        top_k=SEARCH_TOP_K,
                     )
                 ]
             )

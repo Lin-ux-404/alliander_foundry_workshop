@@ -29,9 +29,9 @@ from azure.search.documents.indexes.models import (
     SearchableField,
 )
 
-from shared import get_search_clients
+from shared import get_search_clients, require_successful_upload, scoped_name
 
-INDEX_NAME = os.getenv("AZURE_SEARCH_CREW_INDEX", "idx_crew")
+INDEX_NAME = scoped_name("idx_crew", "AZURE_SEARCH_CREW_INDEX")
 
 DATA_FILE = Path(__file__).parent.parent / "data" / "crew.json"
 
@@ -39,7 +39,8 @@ DATA_FILE = Path(__file__).parent.parent / "data" / "crew.json"
 def _ensure_index(client: SearchIndexClient) -> None:
     fields = [
         SimpleField(name="id", type=SearchFieldDataType.String, key=True, filterable=True),
-        SimpleField(name="crew_id", type=SearchFieldDataType.String, filterable=True),
+        SearchableField(name="crew_id", type=SearchFieldDataType.String, filterable=True),
+        SearchableField(name="search_summary", type=SearchFieldDataType.String),
         SearchableField(name="name", type=SearchFieldDataType.String),
         SimpleField(name="personeelsnummer", type=SearchFieldDataType.String, filterable=True),
         SearchableField(name="functie", type=SearchFieldDataType.String),
@@ -61,6 +62,7 @@ def _ensure_index(client: SearchIndexClient) -> None:
         name="default",
         prioritized_fields=SemanticPrioritizedFields(
             content_fields=[
+                SemanticField(field_name="search_summary"),
                 SemanticField(field_name="name"),
                 SemanticField(field_name="functie"),
             ],
@@ -98,6 +100,13 @@ def main() -> None:
         docs.append({
             "id": crew["crew_id"],
             "crew_id": crew["crew_id"],
+            "search_summary": (
+                f"Crew member {crew['crew_id']}, {crew.get('name', '')}, "
+                f"has role {crew.get('functie', '')}, is linked to "
+                f"authorizations {', '.join(crew.get('raamopdracht_ids', []))}, "
+                f"has demo shift status {crew.get('shift_status_demo', '')}, "
+                f"and home base {crew.get('home_base', '')}."
+            ),
             "name": crew.get("name", ""),
             "personeelsnummer": crew.get("personeelsnummer", ""),
             "functie": crew.get("functie", ""),
@@ -108,7 +117,7 @@ def main() -> None:
         })
 
     result = search_client.upload_documents(docs)
-    succeeded = sum(1 for r in result if r.succeeded)
+    succeeded = require_successful_upload(result, resource_name=INDEX_NAME)
     print(f"Done. Indexed {succeeded}/{len(docs)} crew records into '{INDEX_NAME}'.")
 
 
