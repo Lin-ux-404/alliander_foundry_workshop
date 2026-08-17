@@ -572,6 +572,9 @@ Ensure-UserRoleAssignment $callerId "Cognitive Services User" $foundryResourceId
 # Current user → Search Index Data Reader
 Ensure-UserRoleAssignment $callerId "Search Index Data Reader" $searchResourceId "User ($callerUpn)"
 
+# Current user → Search Index Data Contributor (required by workshop notebooks that upload documents)
+Ensure-UserRoleAssignment $callerId "Search Index Data Contributor" $searchResourceId "User ($callerUpn)"
+
 # Current user → Storage Blob Data Contributor
 Ensure-UserRoleAssignment $callerId "Storage Blob Data Contributor" $storageResourceId "User ($callerUpn)"
 
@@ -601,6 +604,7 @@ $aiConnBody = @{
         target      = $aiResourceId
         authType    = "ApiKey"
         credentials = @{ key = $aiConnectionString }
+        metadata    = @{ ResourceId = $aiResourceId }
     }
 } | ConvertTo-Json -Depth 5
 
