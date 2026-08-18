@@ -292,7 +292,7 @@ Write-Step "Pre-flight checks"
 if (-not (Get-Command az -ErrorAction SilentlyContinue)) {
     throw "Azure CLI is required. Install it, then run 'az login --tenant <tenant-id>'."
 }
-$azVersionText = az version --query '"azure-cli"' --output tsv 2>$null
+$azVersionText = az version --output json 2>$null | ConvertFrom-Json | Select-Object -ExpandProperty "azure-cli" -ErrorAction SilentlyContinue
 if (-not $azVersionText) {
     throw "Azure CLI is installed but could not run. Verify the installation and try again."
 }
@@ -574,7 +574,7 @@ Write-Step "Model deployments"
 
 $models = @(
     @{ Name = "gpt-5.4-mini";             Model = "gpt-5.4-mini";             Version = "2026-03-17"; Sku = "GlobalStandard"; Capacity = 1000 }
-    @{ Name = "text-embedding-ada-002";    Model = "text-embedding-ada-002";    Version = "2";          Sku = "GlobalStandard"; Capacity = 656  }
+    @{ Name = "text-embedding-ada-002";    Model = "text-embedding-ada-002";    Version = "2";          Sku = "GlobalStandard"; Capacity = 500  }
     @{ Name = "gpt-4.1-mini";             Model = "gpt-4.1-mini";             Version = "2025-04-14"; Sku = "GlobalStandard"; Capacity = 5000 }
 )
 

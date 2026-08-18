@@ -44,7 +44,7 @@ placeholder object IDs, and keep `projectIndex` set to `1`.
   -Prefix "workshop-team01" `
   -Location "swedencentral" `
   -SubscriptionId "<subscription-id>" `
-  -AccessManifestPath ".\setup\access-team01.json"
+  -AccessManifestPath ".\setup\access-manifest.json"
 ```
 
 Repeat with `workshop-team02`, `workshop-team03`, and so on. Each invocation is
